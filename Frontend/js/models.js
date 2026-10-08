@@ -122,15 +122,18 @@ export const normRecord = (r) => ({
 export const normCredential = (c) => ({
   id: pick(c, 'credentialId', 'id'),
   type: label(pick(c, 'credentialType', 'type', 'method')) || 'PIN',
-  status: label(pick(c, 'status', 'state')),
-  ts: toTs(pick(c, 'createdAt', 'issuedAt', 'created')),
-  expired: pick(c, 'expired', 'expiresAt', 'expiredAt'),
+  status: label(pick(c, 'status', 'state', 'credentialState')),
+  ts: toTs(pick(c, 'createdAt', 'issuedAt', 'created', 'validFrom')),
+  expired: pick(c, 'expired', 'expiresAt', 'expiredAt', 'validTo'),
+  owner: label(pick(c, 'displayName', 'userName')),
 });
 
 export const normDoor = (d) => ({
   id: pick(d, 'doorId', 'id'),
   name: label(pick(d, 'doorName', 'name')),
   state: label(pick(d, 'state', 'status', 'lockState', 'doorState')),
+  autoLockAt: toTs(pick(d, 'autoLockAt')),           // thời điểm Backend sẽ tự khoá (khi cửa đang mở)
+  autoLockSeconds: Number(pick(d, 'autoLockSeconds')) || 0,
   credentials: asList(pick(d, 'credentials', 'pins', 'accessCredentials') ?? []).map(normCredential),
   raw: d,
 });
@@ -160,29 +163,30 @@ export function normLog(l) {
       || (user && typeof user === 'object' ? label(user) : label(user))
       || (uid != null ? `Người dùng #${uid}` : 'Hệ thống'),
     action: label(pick(l, 'action', 'actionType', 'activityType', 'event', 'type')),
-    target: label(pick(l, 'targetName', 'deviceName', 'doorName', 'targetType', 'entity')),
-    detail: detailText(pick(l, 'detail', 'details', 'description', 'message', 'content', 'metadata')),
+    target: label(pick(l, 'targetName', 'deviceName', 'doorName', 'targetType', 'entity', 'entityType')),
+    detail: detailText(pick(l, 'detail', 'details', 'description', 'message', 'content', 'metadata'))
+      || [label(pick(l, 'source')), label(pick(l, 'result'))].filter(Boolean).join(' · '),
     raw: l,
   };
 }
 
 export function normAttempt(a) {
-  const result = pick(a, 'result', 'status', 'success', 'isSuccess', 'granted');
+  const result = pick(a, 'accessResult', 'result', 'status', 'success', 'isSuccess', 'granted');
   const r = normText(label(result));
   return {
     ts: toTs(pick(a, 'attemptTime', 'attemptedAt', 'createdAt', 'timestamp', 'time')),
     ok: result === true || /success|ok|granted|thanh cong|true|unlock|allow/.test(r) ? true
       : result === false || /fail|denied|lock|sai|false|reject|block/.test(r) ? false : null,
     result: label(result),
-    method: label(pick(a, 'method', 'accessMethod', 'credentialType', 'type')),
+    method: label(pick(a, 'verifyMethod', 'method', 'accessMethod', 'credentialType', 'type')),
     actor: label(pick(a, 'userName', 'displayName', 'userId')),
-    detail: detailText(pick(a, 'detail', 'reason', 'message', 'note')),
+    detail: detailText(pick(a, 'failureReason', 'detail', 'reason', 'message', 'note')),
     raw: a,
   };
 }
 
 export function normNotification(n) {
-  const status = label(pick(n, 'status', 'state'));
+  const status = label(pick(n, 'unreadRead', 'status', 'state'));   // BE: Unread_Read = 'Unread' | 'Read'
   return {
     id: pick(n, 'notificationId', 'id'),
     title: label(pick(n, 'title', 'subject', 'notificationType', 'type')) || 'Thông báo',
@@ -196,7 +200,7 @@ export function normNotification(n) {
 
 export const normFaceProfile = (f) => {
   const data = pick(f, 'faceData', 'vector', 'faceVector');
-  let dims = null;
+  let dims = Number(pick(f, 'faceDims')) || null;
   if (Array.isArray(data)) dims = data.length;
   else if (typeof data === 'string' && data.startsWith('[')) { try { dims = JSON.parse(data).length; } catch {} }
   return {
@@ -204,7 +208,7 @@ export const normFaceProfile = (f) => {
     userId: pick(f, 'userId'),
     name: label(pick(f, 'displayName', 'userName', 'name')),
     dims,
-    expired: pick(f, 'expired', 'expiresAt', 'expiredAt'),
+    expired: pick(f, 'expired', 'expiresAt', 'expiredAt', 'validTo'),
     ts: toTs(pick(f, 'createdAt', 'registeredAt')),
     raw: f,
   };
@@ -221,3 +225,5 @@ export function parseVoiceCommand(text) {
   if (/\bquat\b/.test(t)) return { kind: 'fan', speed: off && !on ? 0 : pct ? clamp(+pct[1], 0, 100) : 100 };
   return null;
 }
+
+

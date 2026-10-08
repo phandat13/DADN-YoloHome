@@ -7,7 +7,8 @@ const { pool } = require('../db');
 const requirePermission = (permissionInput) => async (req, res, next) => {
   try {
     // 1. Trích xuất homeId từ params, query hoặc body
-    const rawHomeId = req.params.homeId || req.query.homeId || req.body.homeId;
+    // (Express 5: req.body là undefined với request không có body, VD GET)
+    const rawHomeId = req.params?.homeId || req.query?.homeId || req.body?.homeId;
     const homeId = parseInt(rawHomeId, 10);
 
     if (!homeId || Number.isNaN(homeId)) {
@@ -67,3 +68,4 @@ const requirePermission = (permissionInput) => async (req, res, next) => {
 };
 
 module.exports = requirePermission;
+

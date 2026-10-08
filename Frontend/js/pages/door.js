@@ -1,9 +1,9 @@
 // Cửa thông minh (UC 3.2): verify-pin (public), change-pin, pins, credentials, unlock, attempts, tạo cửa.
-import { state, on, onChange, markDoorOpened, refreshHomeData, addLog } from '../store.js';
+import { state, on, onChange, markDoorOpened, markDoorLocked, refreshHomeData, addLog } from '../store.js';
 import { api } from '../api.js';
 import { PIN_PATTERN } from '../config.js';
-import { asList, asObject, deepFind, pick, esc, fullTime } from '../utils/fields.js';
-import { normAttempt } from '../models.js';
+import { asList, asObject, deepFind, pick, esc, fullTime, toTs } from '../utils/fields.js';
+import { normAttempt, normCredential } from '../models.js';
 import { panel, pageTitle, badge, segmented, button, field, inputCls, emptyState, loadingBlock, errorBlock, toast, busy, formValues, fail } from '../ui.js';
 
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', 'F'];
@@ -15,6 +15,7 @@ export const doorPage = {
   mount(root) {
     let buf = '', mode = 'open', step = 0, oldPin = '', newPin = '', msg = null;
     let attempts = null, attemptsErr = null, alive = true;
+    let creds = null, credsErr = null;          // GET /doors/:doorName/credentials (cần DOOR_MANAGE)
     const door = () => state.doors.find((d) => d.name === selected) ?? null;
     const ensureSelected = () => { if (!state.doors.some((d) => d.name === selected)) selected = state.doors[0]?.name ?? null; };
 
@@ -37,7 +38,7 @@ export const doorPage = {
                 ${button('Thu hồi', { type: 'submit', tone: 'danger', icon: 'block' })}
               </form>
             </div>
-            <p class="text-[11px] text-slate-400 mt-3">Cần quyền DOOR_MANAGE. Đổi mã PIN dùng tab "Đổi mã PIN" trên bàn phím.</p>` })}
+            <p class="text-[11px] text-slate-400 mt-3">Cần quyền DOOR_MANAGE. Đổi mã PIN dùng tab "Đổi mã PIN" trên bàn phím (nhập mã hiện tại của cửa này).</p>` })}
           ${panel({ title: 'Thêm cửa', icon: 'add_box', body: `
             <form data-form="create-door" class="flex gap-2 items-end">
               ${field('Tên cửa', `<input name="doorName" placeholder="VD: Cửa chính" class="${inputCls}">`)}
@@ -91,19 +92,28 @@ export const doorPage = {
       });
     };
 
+    // Trạng thái khoá theo Backend + đếm ngược tới lúc tự khoá
+    const lockBadge = (d) => {
+      if (!/unlocked/i.test(d.state)) return badge('ĐÃ KHOÁ', 'slate');
+      const left = d.autoLockAt ? Math.max(0, Math.ceil((d.autoLockAt - Date.now()) / 1000)) : null;
+      return badge(left != null ? `ĐANG MỞ · tự khoá sau ${left}s` : 'ĐANG MỞ', 'emerald');
+    };
+
     const paintCtrl = () => {
       const d = door();
       if (!d) return;
+      const secs = d.autoLockSeconds;
       $('#door-ctrl').innerHTML = panel({
         title: 'Điều khiển từ xa', icon: 'lock_open',
-        right: badge(state.doorOpen ? 'ĐANG MỞ' : (d.state || 'Đóng'), state.doorOpen ? 'emerald' : 'slate'),
+        right: `<span id="door-lock-badge">${lockBadge(d)}</span>`,
         body: `
           <div class="flex flex-wrap items-center gap-2">
             ${button('Mở khoá', { act: 'unlock', val: 'unlocked', icon: 'lock_open' })}
             ${button('Khoá', { act: 'unlock', val: 'locked', tone: 'secondary', icon: 'lock' })}
             <span class="text-xs text-slate-400 ml-1">Cửa: <b class="text-slate-700">${esc(d.name)}</b>${d.id != null ? ` · ID ${esc(d.id)}` : ''}</span>
           </div>
-          <p class="text-[11px] text-slate-400 mt-3">Gửi lệnh MQTT qua <span class="font-mono">POST /doors/:doorName/unlock</span> (cần quyền DOOR_MANAGE).</p>`,
+          <p class="text-[11px] text-slate-400 mt-3">Gửi lệnh MQTT lên feed <span class="font-mono">smart-door</span> qua <span class="font-mono">POST /doors/:doorName/unlock</span> (cần quyền DOOR_MANAGE).
+            ${secs ? `Sau khi mở (PIN, FaceAI hoặc từ xa), cửa tự khoá sau <b>${secs} giây</b> và gửi <span class="font-mono">LOCK_DOOR</span> lên feed.` : 'Tự khoá đang tắt (DOOR_AUTO_LOCK_SECONDS=0).'}</p>`,
       });
     };
 
@@ -112,17 +122,42 @@ export const doorPage = {
       if (!d) return;
       const map = new Map();
       d.credentials.forEach((c) => map.set(String(c.id), c));
+      (creds ?? []).forEach((c) => map.set(String(c.id), c));
       (issued[d.name] ?? []).forEach((c) => { if (!map.has(String(c.id))) map.set(String(c.id), { ...c, type: 'PIN', status: 'Vừa cấp' }); });
-      const creds = [...map.values()].filter((c) => c.id != null);
-      $('#cred-list').innerHTML = creds.length ? `
+      const list = [...map.values()].filter((c) => c.id != null).sort((a, b) => Number(b.id) - Number(a.id));
+      const active = (c) => !/revoked|expired|inactive/i.test(c.status || '');
+      let html;
+      if (list.length) {
+        html = `
         <div class="divide-y divide-slate-100 border border-slate-100 rounded-lg">
-          ${creds.map((c) => `<div class="flex items-center justify-between px-3 py-2 text-sm">
-            <div class="flex items-center gap-2"><span class="material-symbols-outlined text-[18px] text-slate-400">password</span>
-              <span class="font-mono text-slate-700">#${esc(c.id)}</span>${badge(c.type, 'sky')}${c.status ? badge(c.status, 'slate') : ''}
-              <span class="text-xs text-slate-400">${c.ts ? fullTime(c.ts) : ''}</span></div>
-            ${button('Thu hồi', { act: 'revoke', val: c.id, tone: 'danger', size: 'sm' })}
+          ${list.map((c) => `<div class="flex items-center justify-between px-3 py-2 text-sm ${active(c) ? '' : 'opacity-60'}">
+            <div class="flex items-center gap-2 flex-wrap"><span class="material-symbols-outlined text-[18px] text-slate-400">password</span>
+              <span class="font-mono text-slate-700">#${esc(c.id)}</span>${badge(c.type, 'sky')}${c.status ? badge(c.status, active(c) ? 'emerald' : 'slate') : ''}
+              ${c.owner ? `<span class="text-xs text-slate-600">${esc(c.owner)}</span>` : ''}
+              <span class="text-xs text-slate-400">${c.expired ? `hết hạn ${fullTime(toTs(c.expired))}` : c.ts ? fullTime(c.ts) : ''}</span></div>
+            ${active(c) ? button('Thu hồi', { act: 'revoke', val: c.id, tone: 'danger', size: 'sm' }) : ''}
           </div>`).join('')}
-        </div>` : '<p class="text-xs text-slate-400">Backend không trả danh sách credential trong thông tin cửa — có thể thu hồi theo ID bên dưới.</p>';
+        </div>`;
+      } else if (creds === null) html = loadingBlock('Đang tải danh sách mã PIN…');
+      else if (credsErr) html = `<p class="text-xs text-slate-400">${esc(credsErr)}</p>`;
+      else html = '<p class="text-xs text-slate-400">Cửa này chưa có mã PIN nào.</p>';
+      $('#cred-list').innerHTML = html;
+    };
+
+    const loadCreds = async () => {
+      const d = door();
+      if (!d) return;
+      try {
+        const res = await api.doors.credentials(state.homeId, d.name);
+        if (!alive || d.name !== selected) return;
+        creds = asList(res, 'credentials').map(normCredential);
+        credsErr = null;
+      } catch (e) {
+        if (!alive || d.name !== selected) return;
+        creds = [];
+        credsErr = e.status === 403 ? 'Cần quyền DOOR_MANAGE để xem danh sách mã PIN.' : `Không tải được danh sách mã PIN: ${e.message}`;
+      }
+      paintCreds();
     };
 
     const paintAttempts = () => {
@@ -185,9 +220,11 @@ export const doorPage = {
         msg = { ok: null, text: 'Đang xác thực…' };
         paintKeypad();
         try {
-          await api.doors.verifyPin(state.homeId, d.name, pin);
-          msg = { ok: true, text: 'ĐÚNG MÃ PIN — cửa đang mở' };
-          markDoorOpened('mã PIN', d.name);
+          const res = await api.doors.verifyPin(state.homeId, d.name, pin);
+          const info = res?.data ?? {};
+          if (info.mqttPublished === false) msg = { ok: false, text: `ĐÚNG MÃ PIN nhưng chưa gửi được lệnh tới Adafruit — ${res.message}` };
+          else msg = { ok: true, text: `ĐÚNG MÃ PIN — cửa đang mở${info.autoLockSeconds ? `, tự khoá sau ${info.autoLockSeconds}s` : ''}` };
+          markDoorOpened('mã PIN', d.name, info);
           setTimeout(loadAttempts, 500);
         } catch (e) {
           if (e.status === 429) msg = { ok: false, text: 'TẠM KHOÁ: nhập sai quá 5 lần trong 10 phút, vui lòng thử lại sau' };
@@ -213,6 +250,7 @@ export const doorPage = {
           msg = { ok: true, text: 'Đã đổi mã PIN thành công' };
           toast('Đã đổi mã PIN', 'emerald');
           addLog('door', `Đổi mã PIN cửa "${d.name}"`);
+          loadCreds();
         } catch (e) {
           resetKeypad();
           msg = { ok: false, text: `Không đổi được mã PIN — ${e.message}` };
@@ -238,9 +276,15 @@ export const doorPage = {
       if (act === 'unlock' && d) {
         await busy(b, async () => {
           try {
-            await api.doors.unlock(state.homeId, d.name, val);
-            if (val === 'unlocked') { markDoorOpened('mở từ xa', d.name); toast(`Đã gửi lệnh mở khoá "${d.name}"`, 'emerald'); }
-            else { addLog('door', `Khoá cửa "${d.name}" từ xa`); toast(`Đã gửi lệnh khoá "${d.name}"`, 'sky'); }
+            const res = await api.doors.unlock(state.homeId, d.name, val);
+            if (val === 'unlocked') {
+              markDoorOpened('mở từ xa', d.name, res?.data);
+              toast(`${res?.message || 'Đã mở khoá'} — "${d.name}"`, 'emerald');
+            } else {
+              markDoorLocked(d.name);
+              addLog('door', `Khoá cửa "${d.name}" từ xa`);
+              toast(`Đã gửi lệnh khoá "${d.name}"`, 'sky');
+            }
             setTimeout(loadAttempts, 500);
           } catch (err) { fail(err, 'Không gửi được lệnh'); }
         });
@@ -258,16 +302,16 @@ export const doorPage = {
         toast(`Đã thu hồi credential #${credentialId}`, 'emerald');
         addLog('door', `Thu hồi credential #${credentialId} của cửa "${d.name}"`);
         await refreshHomeData({ silent: true });
-        paintCreds();
+        await loadCreds();
       } catch (err) { fail(err, 'Không thu hồi được'); }
     };
 
     root.addEventListener('change', (e) => {
       if (e.target.id !== 'door-select') return;
       selected = e.target.value;
-      resetKeypad(); mode = 'open'; attempts = null;
+      resetKeypad(); mode = 'open'; attempts = null; creds = null;
       paintAll();
-      loadAttempts();
+      loadAttempts(); loadCreds();
     });
 
     root.addEventListener('submit', async (e) => {
@@ -287,7 +331,7 @@ export const doorPage = {
             toast(`Đã cấp mã PIN mới${id != null ? ` (credential #${id})` : ''}`, 'emerald');
             addLog('door', `Cấp mã PIN mới cho cửa "${d.name}"`);
             await refreshHomeData({ silent: true });
-            paintCreds();
+            await loadCreds();
           } catch (err) { fail(err, 'Không cấp được mã PIN'); }
         });
       } else if (f.id === 'revoke-cred' && d) {
@@ -302,9 +346,9 @@ export const doorPage = {
             toast(`Đã tạo cửa "${v.doorName}"`, 'emerald');
             selected = pick(asObject(res, 'door'), 'doorName', 'name') ?? v.doorName;
             await refreshHomeData({ silent: true });
-            attempts = null;
+            attempts = null; creds = null;
             paintAll();
-            loadAttempts();
+            loadAttempts(); loadCreds();
           } catch (err) { fail(err, 'Không tạo được cửa'); }
         });
       }
@@ -312,15 +356,24 @@ export const doorPage = {
 
     paintAll();
     loadAttempts();
+    loadCreds();
     const offs = [
       onChange(['doors', 'loading'], () => JSON.stringify([state.loading, state.errors.doors, state.doors.map((d) => [d.name, d.state, d.credentials.map((c) => c.id)])]), () => {
         const prev = selected;
         ensureSelected();
         paintPicker(); paintEmpty(); paintCtrl(); paintCreds();
-        if (selected !== prev) { resetKeypad(); attempts = null; paintKeypad(); paintAttempts(); loadAttempts(); }
+        if (selected !== prev) { resetKeypad(); attempts = null; creds = null; paintKeypad(); paintAttempts(); paintCreds(); loadAttempts(); loadCreds(); }
       }),
       on('door', paintCtrl),
     ];
-    return () => { alive = false; offs.forEach((off) => off()); };
+    // Đếm ngược mỗi giây: chỉ cập nhật huy hiệu (không vẽ lại nút để không mất cú bấm)
+    const tick = setInterval(() => {
+      const d = door();
+      const el = $('#door-lock-badge');
+      if (d && el && /unlocked/i.test(d.state) && d.autoLockAt) el.innerHTML = lockBadge(d);
+    }, 1000);
+    return () => { alive = false; clearInterval(tick); offs.forEach((off) => off()); };
   },
 };
+
+

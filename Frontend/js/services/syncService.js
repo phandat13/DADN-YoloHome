@@ -29,3 +29,5 @@ export function startSyncService({ onSync } = {}) {
     setTimeout(() => btn.classList.remove('opacity-70'), 400);
   });
 }
+
+

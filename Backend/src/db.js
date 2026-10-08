@@ -1,14 +1,23 @@
 const mysql = require('mysql2/promise');
+const config = require('./config');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME || 'smart_home',
-  timezone: '+00:00',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+// Dùng chung cấu hình trong config.js (trước đây bỏ qua DB_PORT và tự đọc process.env).
+const pool = mysql.createPool(config.db);
+
+// Múi giờ của máy chạy Node, dạng '+07:00'.
+const nodeUtcOffset = () => {
+  const minutes = -new Date().getTimezoneOffset();
+  const sign = minutes >= 0 ? '+' : '-';
+  const abs = Math.abs(minutes);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+};
+
+// Đặt múi giờ phiên MySQL trùng với Node để NOW()/CURRENT_TIMESTAMP và Date của JS luôn khớp nhau,
+// kể cả khi MySQL chạy ở múi giờ khác (VD: Docker để UTC).
+pool.on('connection', (connection) => {
+  connection.query(`SET time_zone = '${nodeUtcOffset()}'`, (err) => {
+    if (err) console.error('[Database] Không đặt được time_zone cho phiên MySQL:', err.message);
+  });
 });
 
 const callProc = async (procName, inParams = [], outParams = []) => {

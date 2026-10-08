@@ -53,3 +53,5 @@ export function parseVector(text) {
   if (!Array.isArray(arr) || !arr.length || !arr.every((x) => typeof x === 'number' && Number.isFinite(x))) return null;
   return arr;
 }
+
+

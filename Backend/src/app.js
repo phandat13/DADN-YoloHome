@@ -21,10 +21,8 @@ const app = express();
 // 1. Gắn các middleware chung
 app.use(helmet());
 
-// Cấu hình CORS an toàn hỗ trợ credentials cho Frontend
-const allowedOrigins = config.corsOrigin
-  ? config.corsOrigin.split(',').map((origin) => origin.trim())
-  : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8000'];
+// Cấu hình CORS an toàn hỗ trợ credentials cho Frontend (danh sách trong config.js / CORS_ORIGIN)
+const allowedOrigins = config.corsOrigins;
 
 app.use(
   cors({
@@ -33,7 +31,8 @@ app.use(
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error('Chặn bởi chính sách CORS'));
+        console.warn(`[CORS] Chặn origin ${origin}. Thêm vào CORS_ORIGIN trong .env nếu đây là Frontend của bạn.`);
+        callback(null, false);
       }
     },
     credentials: true,
@@ -55,19 +54,22 @@ app.get('/health', (req, res) => {
 });
 
 // 3. Mount các routes chính
+// Các router con /api/homes/:homeId/... được gắn TRƯỚC router /api/homes để request của phần cứng
+// (x-iot-key, không có JWT) không bị chặn bởi bước đăng nhập của router nhà.
 app.use('/api/auth', authRoutes);
 app.use('/api/device-types', deviceTypeRoutes); // Danh mục thiết bị toàn hệ thống
-app.use('/api/homes', homeRoutes);
 app.use('/api/homes/:homeId/members', memberRoutes);
 app.use('/api/homes/:homeId/devices', deviceRoutes);
 app.use('/api/homes/:homeId/doors', doorRoutes);
 app.use('/api/homes/:homeId/iot', iotRouter);
 app.use('/api/homes/:homeId/ai', aiRouter);
-app.use('/api/notifications', notificationRouter);
 app.use('/api/homes/:homeId/activity-logs', activityLogRouter);
+app.use('/api/homes', homeRoutes);
+app.use('/api/notifications', notificationRouter);
 
 // 4. Xử lý 404 và Error Handler (bắt buộc đặt cuối cùng)
 app.use(notFound);
 app.use(errorHandler);
 
 module.exports = app;
+

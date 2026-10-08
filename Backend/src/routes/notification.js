@@ -16,7 +16,7 @@ router.get(
     const { status } = req.query; // 'Unread', 'Read' hoặc undefined
 
     let sql = `
-      SELECT Notification_ID, Title, Type, Content, Level, Unread_Read, User_ID
+      SELECT Notification_ID, Title, Type, Content, Level, Unread_Read, Created_At, User_ID
       FROM Notification
       WHERE User_ID = ?
     `;
@@ -48,22 +48,8 @@ router.patch(
   asyncHandler(async (req, res) => {
     const userId = req.user.User_ID;
 
-    // Ưu tiên chạy Stored Procedure nếu có
-    try {
-      await callProc('sp_mark_notifications_read', [userId, null]);
-    } catch {
-      // Fallback query trực tiếp
-      await pool.query(
-        "UPDATE Notification SET Unread_Read = 'Read' WHERE User_ID = ? AND Unread_Read = 'Unread'",
-        [userId]
-      );
-    }
-
-    // Đảm bảo cập nhật toàn bộ trạng thái Unread
-    await pool.query(
-      "UPDATE Notification SET Unread_Read = 'Read' WHERE User_ID = ? AND Unread_Read = 'Unread'",
-      [userId]
-    );
+    // p_notification_id = NULL -> đánh dấu tất cả
+    await callProc('sp_mark_notifications_read', [userId, null]);
 
     res.status(200).json({
       success: true,
@@ -90,19 +76,23 @@ router.patch(
       });
     }
 
-    const [result] = await pool.query(
-      `UPDATE Notification 
-       SET Unread_Read = 'Read' 
-       WHERE Notification_ID = ? AND User_ID = ?`,
+    // Kiểm tra quyền sở hữu trước: UPDATE trả affectedRows = 0 cả khi thông báo đã được đọc từ trước
+    const [owned] = await pool.query(
+      'SELECT 1 FROM Notification WHERE Notification_ID = ? AND User_ID = ? LIMIT 1',
       [notificationId, userId]
     );
 
-    if (result.affectedRows === 0) {
+    if (owned.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Không tìm thấy thông báo hoặc bạn không có quyền sửa thông báo này',
       });
     }
+
+    await pool.query(
+      "UPDATE Notification SET Unread_Read = 'Read' WHERE Notification_ID = ? AND User_ID = ?",
+      [notificationId, userId]
+    );
 
     res.status(200).json({
       success: true,
@@ -112,3 +102,4 @@ router.patch(
 );
 
 module.exports = router;
+

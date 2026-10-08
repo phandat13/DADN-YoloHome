@@ -9,8 +9,11 @@ const validate = (schema) => (req, res, next) => {
     });
 
     if (parsed.body !== undefined) req.body = parsed.body;
-    if (parsed.query !== undefined) req.query = parsed.query;
-    if (parsed.params !== undefined) req.params = parsed.params;
+    // Express 5: req.query chỉ có getter, gán trực tiếp sẽ không có tác dụng
+    if (parsed.query !== undefined) {
+      Object.defineProperty(req, 'query', { value: parsed.query, writable: true, configurable: true, enumerable: true });
+    }
+    if (parsed.params !== undefined) req.params = { ...req.params, ...parsed.params };
 
     next();
   } catch (err) {
@@ -32,3 +35,4 @@ const validate = (schema) => (req, res, next) => {
 };
 
 module.exports = validate;
+

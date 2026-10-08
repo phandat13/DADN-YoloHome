@@ -3,7 +3,7 @@
 export const CONFIG = {
   API_BASE_URL: 'http://localhost:3000/api',   // Base URL HTTP API (tài liệu BE mục 1)
   SOCKET_URL: 'http://localhost:3000',         // Base URL Socket.IO
-  COMMAND_SOURCE: 'APP',                       // sourceType gửi kèm lệnh điều khiển thiết bị
+  COMMAND_SOURCE: 'USER',                      // sourceType gửi kèm lệnh (USER | VOICE_COMMAND | SCHEDULE | SYSTEM)
 };
 
 // Ngưỡng cảnh báo. Backend chưa có API ngưỡng nên giá trị được lưu trong localStorage.
@@ -17,7 +17,6 @@ export const THRESHOLDS = { ...DEFAULT_THRESHOLDS };
 
 export const TIMING = {
   SYNC_INTERVAL_S: 30,          // chu kỳ làm mới dữ liệu qua REST (bổ trợ cho Socket.IO)
-  DOOR_OPEN_MS: 2000,           // servo mở cửa 2 giây
   FRESH_DATA_MS: 10 * 60e3,     // chỉ tự động hoá theo số liệu mới hơn 10 phút
   NTP_SYNC_S: 1,
   PIR_SCAN_S: 0.1,
@@ -28,7 +27,7 @@ export const DEVICE = {
   platform: 'AIoT Platform',
   logo: 'https://lh3.googleusercontent.com/aida/AEtjO1VsqoZK3ugDy6qL5JEZHYI1KojDup7qthkuTb5wNH8_tzSQXeCswV53wBVAsXQykFVnIhqWLWPfQa_gJ8KGAnxoUvvVvQf71GHo4Qe2RZeSxs1DZMqMUY5GhfE1pLvBbWrxHIMJuP0JKxID1xVHwdN02dcc-m-trad8h2NqKCJRm1A99rz-uTvefdohh9TzXGS9c0Mu5MLe1NTE5XPhrdXrgPl1cF80zIKeestniksmUke631sbuuzKiw',
   board: 'Yolo:Bit',
-  broker: 'mqtt.ohstem.vn',
+  broker: 'io.adafruit.com',                    // Backend kết nối MQTT tới Adafruit IO
   lcdAddress: '0x27',
 };
 
@@ -42,7 +41,7 @@ export const SENSOR_TYPES = [                            // [dataType, đơn v�
   ['Motion', '', 'Chuyển động (PIR)'],
 ];
 export const DATA_QUALITIES = ['GOOD', 'UNCERTAIN', 'BAD'];
-export const FACE = { DEFAULT_THRESHOLD: 75, MATCH_DISTANCE: 0.6 };
+export const FACE = { DEFAULT_THRESHOLD: 75, MATCH_DISTANCE: 0.55 };   // trùng với ngưỡng cố định ở Backend (routes/ai.js)
 
 export const NAV_GROUPS = [
   { title: 'Giám sát & điều khiển', items: [
@@ -61,3 +60,5 @@ export const NAV_GROUPS = [
     { icon: 'settings',      label: 'Cài đặt',             route: 'settings' },
   ] },
 ];
+
+

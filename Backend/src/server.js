@@ -6,14 +6,13 @@ const app = require('./app');
 const config = require('./config');
 const { pool } = require('./db');
 const { initMQTT } = require('./services/mqttService');
+const { resumeAutoLocks } = require('./services/doorAutoLock');
 
 // 1. Khởi tạo HTTP server bọc Express App
 const server = http.createServer(app);
 
 // 2. Cấu hình WebSocket (Socket.IO) an toàn, tránh CORS wildcard khi dùng credentials
-const allowedOrigins = config.corsOrigin
-  ? config.corsOrigin.split(',').map((o) => o.trim())
-  : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8000'];
+const allowedOrigins = config.corsOrigins;
 
 const io = new Server(server, {
   cors: {
@@ -55,15 +54,10 @@ io.on('connection', (socket) => {
       const parsedHomeId = parseInt(homeId, 10);
       if (Number.isNaN(parsedHomeId)) return;
 
-      const [rows] = await pool.query(
-        `SELECT 1 FROM Home_Member 
-         WHERE User_ID = ? AND Home_ID = ? 
-           AND (Expired IS NULL OR Expired >= NOW())
-         LIMIT 1`,
-        [userId, parsedHomeId]
-      );
+      // Cùng quy tắc với REST API: thành viên còn hiệu lực (Status active, chưa hết hạn)
+      const [rows] = await pool.query('SELECT fn_is_home_member(?, ?) AS isMember', [userId, parsedHomeId]);
 
-      if (rows.length > 0 || socket.user?.Role === 'ADMIN') {
+      if (rows[0]?.isMember === 1) {
         const roomName = `home_${parsedHomeId}`;
         socket.join(roomName);
         socket.emit('joined_home', { homeId: parsedHomeId, room: roomName });
@@ -76,8 +70,8 @@ io.on('connection', (socket) => {
   });
 
   socket.on('leave_home', (homeId) => {
-    const roomName = `home_${homeId}`;
-    socket.leave(roomName);
+    const parsedHomeId = parseInt(homeId, 10);
+    if (!Number.isNaN(parsedHomeId)) socket.leave(`home_${parsedHomeId}`);
   });
 
   socket.on('disconnect', () => {});
@@ -96,6 +90,9 @@ const PORT = config.port || 3000;
 server.listen(PORT, () => {
   console.log(`Server YoloHome đang chạy tại: http://localhost:${PORT}`);
   console.log(`Health check sẵn sàng tại: http://localhost:${PORT}/health`);
+  console.log(`Cửa tự khoá sau: ${config.doorAutoLockSeconds ? `${config.doorAutoLockSeconds} giây` : 'TẮT'} (DOOR_AUTO_LOCK_SECONDS)`);
+  // Cửa còn đang mở từ lần chạy trước -> hẹn giờ khoá lại
+  resumeAutoLocks(io).catch((err) => console.error('[AUTO-LOCK] Không đọc được trạng thái cửa:', err.message));
 });
 
 // 7. Xử lý tắt ứng dụng an toàn (Graceful Shutdown)
@@ -136,8 +133,9 @@ const handleShutdown = async (signal) => {
   setTimeout(() => {
     console.error('[Server] Tắt quá thời gian quy định, buộc dừng tiến trình.');
     process.exit(1);
-  }, 10000);
+  }, 10000).unref();
 };
 
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+

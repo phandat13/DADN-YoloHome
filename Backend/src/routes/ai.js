@@ -8,31 +8,16 @@ const auth = require('../middlewares/auth');
 const checkPermission = require('../middlewares/permission');
 const validate = require('../middlewares/validate');
 const { publishCommand } = require('../services/mqttService');
-const config = require('../config');
+const { doorUnlocked } = require('../services/doorAutoLock');
+const { iotKeyOrUser } = require('../middlewares/iotAuth');
+const { toMysqlDatetime, optionalDateSchema } = require('../utils/datetime');
+const { resolveValidFeedKey, isFanDevice } = require('../utils/feeds');
+const { requireDoorInHome } = require('../utils/doors');
 
 // ==========================================
 // 0. HELPER FUNCTIONS & MIDDLEWARES
 // ==========================================
 
-// Middleware xác thực x-iot-key cho thiết bị phần cứng (Camera, Cửa)
-const requireIotKey = (req, res, next) => {
-  const clientKey = req.headers['x-iot-key'];
-  if (!config.iotApiKey || clientKey !== config.iotApiKey) {
-    return res.status(401).json({
-      success: false,
-      message: 'Không có quyền truy cập: IoT Key không hợp lệ hoặc bị thiếu',
-    });
-  }
-  next();
-};
-
-// Chuẩn hóa định dạng thời gian ISO sang chuỗi MySQL DATETIME (YYYY-MM-DD HH:mm:ss)
-const toMysqlDatetime = (dateStr) => {
-  if (!dateStr) return null;
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 19).replace('T', ' ');
-};
 
 // Lấy tên cửa trực tiếp từ Express route param (Express đã tự decodeURIComponent)
 const getDoorName = (req) => req.params.doorName;
@@ -95,20 +80,14 @@ const parseVietnameseVoiceIntent = (rawText) => {
 // 1. ZOD SCHEMAS
 // ==========================================
 
-const dateSchema = z
-  .union([
-    z.string().datetime({ offset: true }),
-    z.string().datetime(),
-    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Định dạng ngày phải là YYYY-MM-DD'),
-  ])
-  .nullable()
-  .optional();
+const dateSchema = optionalDateSchema;
+const intLike = z.preprocess((v) => (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : v), z.number().int());
 
 const registerFaceSchema = z.object({
   body: z
     .object({
-      targetUserId: z.number().int().optional(),
-      userId: z.number().int().optional(),
+      targetUserId: intLike.optional(),
+      userId: intLike.optional(),
       faceName: z.string().trim().optional(),
       faceData: z.array(z.number()).optional().nullable(),
       validFrom: dateSchema,
@@ -161,8 +140,8 @@ router.post(
     const actorId = req.user.User_ID;
     const homeId = parseInt(req.params.homeId, 10);
     const targetUserId = req.body.targetUserId ?? req.body.userId;
-    const validFrom = toMysqlDatetime(req.body.validFrom);
-    const validTo = toMysqlDatetime(req.body.validTo);
+    const validFrom = toMysqlDatetime(req.body.validFrom, { dateOnly: 'start' });
+    const validTo = toMysqlDatetime(req.body.validTo, { dateOnly: 'end' });
     const { faceData } = req.body;
 
     const outResult = await callProc(
@@ -179,6 +158,7 @@ router.post(
         [JSON.stringify(faceData), profileId]
       );
     }
+    await pool.query('CALL sp_log_activity(?, ?, ?, ?, ?, ?)', [actorId, homeId, 'face_profile', 'register_face', 'web', 'success']);
 
     res.status(201).json({
       success: true,
@@ -214,7 +194,9 @@ router.get(
               u.Display_name AS displayName, 
               fp.Valid_From AS validFrom, 
               fp.Valid_To AS validTo,
-              (fp.Face_Data IS NOT NULL) AS hasFaceData
+              fp.Created_At AS createdAt,
+              (fp.Face_Data IS NOT NULL) AS hasFaceData,
+              IF(fp.Face_Data IS NULL, NULL, JSON_LENGTH(fp.Face_Data)) AS faceDims
        FROM Face_Profile fp
        JOIN \`User\` u ON u.User_ID = fp.User_ID
        WHERE fp.Home_ID = ?`,
@@ -241,8 +223,14 @@ router.put(
   asyncHandler(async (req, res) => {
     const actorId = req.user.User_ID;
     const profileId = parseInt(req.params.profileId, 10);
-    const validFrom = toMysqlDatetime(req.body.validFrom);
-    const validTo = toMysqlDatetime(req.body.validTo);
+    const validFrom = toMysqlDatetime(req.body.validFrom, { dateOnly: 'start' });
+    const validTo = toMysqlDatetime(req.body.validTo, { dateOnly: 'end' });
+
+    // Hồ sơ phải thuộc nhà trong URL
+    const [own] = await pool.query('SELECT 1 FROM Face_Profile WHERE Face_Profile_ID = ? AND Home_ID = ?', [profileId, req.params.homeId]);
+    if (own.length === 0) {
+      return res.status(404).json({ success: false, message: 'FaceProfile không tồn tại trong ngôi nhà này' });
+    }
 
     await callProc(
       'sp_set_face_profile_validity',
@@ -270,6 +258,11 @@ router.delete(
     const actorId = req.user.User_ID;
     const profileId = parseInt(req.params.profileId, 10);
 
+    const [own] = await pool.query('SELECT 1 FROM Face_Profile WHERE Face_Profile_ID = ? AND Home_ID = ?', [profileId, req.params.homeId]);
+    if (own.length === 0) {
+      return res.status(404).json({ success: false, message: 'FaceProfile không tồn tại trong ngôi nhà này' });
+    }
+
     await callProc('sp_delete_face_profile', [actorId, profileId], []);
 
     res.status(200).json({
@@ -286,24 +279,30 @@ router.delete(
 /**
  * @route   POST /api/homes/:homeId/ai/doors/:doorName/face-recognition
  * @desc    Nhận kết quả AI từ camera để mở cửa, đối soát vector an toàn
- * @access  Yêu cầu Header x-iot-key
+ * @access  Header x-iot-key (camera trước cửa) hoặc người dùng đã đăng nhập có quyền DOOR_UNLOCK
+ *          (trang "AI & Nhận diện" trên web dùng webcam làm camera cửa)
  */
 router.post(
   '/doors/:doorName/face-recognition',
-  requireIotKey,
+  iotKeyOrUser('DOOR_UNLOCK'),
+  requireDoorInHome,
   validate(faceRecognitionSchema),
   asyncHandler(async (req, res) => {
     const doorName = getDoorName(req);
     const homeId = parseInt(req.params.homeId, 10);
     const { inputFaceVector } = req.body;
 
-    // Ngưỡng bảo mật cố định trên server
+    // Ngưỡng bảo mật cố định trên server.
+    // Độ tin cậy được quy đổi sao cho khoảng cách = EUCLIDEAN_THRESHOLD ứng với đúng SERVER_THRESHOLD (75%).
+    // (Bản cũ tính (1 - d) * 100 nên chỉ khoảng cách <= 0.25 mới đạt 75% -> người đúng vẫn bị từ chối.)
     const SERVER_THRESHOLD = 75.0;
     const EUCLIDEAN_THRESHOLD = 0.55;
+    const toReliability = (d) =>
+      Number.isFinite(d) ? Math.min(100, Math.max(0, Math.round((100 - (d / EUCLIDEAN_THRESHOLD) * (100 - SERVER_THRESHOLD)) * 100) / 100)) : 0;
 
     // Chỉ lấy hồ sơ hợp lệ còn trong hạn truy cập
     const [profiles] = await pool.query(
-      `SELECT fp.Face_Profile_ID, fp.Face_Data, u.Name 
+      `SELECT fp.Face_Profile_ID, fp.Face_Data, fp.User_ID, u.Name 
        FROM Face_Profile fp
        JOIN \`User\` u ON fp.User_ID = u.User_ID
        WHERE fp.Home_ID = ? 
@@ -336,11 +335,12 @@ router.post(
     if (bestMatch && minDistance <= EUCLIDEAN_THRESHOLD) {
       faceProfileId = bestMatch.Face_Profile_ID;
       label = bestMatch.Name;
-      reliability = Math.min(100, Math.max(0, Math.round((1 - minDistance) * 100)));
+      reliability = toReliability(minDistance);
     } else {
       label = 'unknown';
-      reliability = Math.min(100, Math.max(0, Math.round((1 - Math.min(minDistance, 1)) * 50)));
+      reliability = toReliability(minDistance);
     }
+    const distance = Number.isFinite(minDistance) ? Math.round(minDistance * 10000) / 10000 : null;
 
     const outResult = await callProc(
       'sp_record_face_recognition',
@@ -357,16 +357,19 @@ router.post(
     const decision = extractOutValue(outResult, 'p_decision');
 
     if (decision === 'allowed') {
-      // Gửi lệnh MQTT mở cửa qua hàm publishCommand với chữ ký chuẩn
-      const feedKey = 'smart-door';
-      publishCommand(feedKey, { action: 'UNLOCK_DOOR', doorName });
+      // Gửi UNLOCK_DOOR lên feed 'smart-door' + hẹn giờ tự khoá (gửi LOCK_DOOR khi hết giờ)
+      const door = doorUnlocked({ io: req.app.get('io'), homeId, doorName, source: 'face', userId: bestMatch?.User_ID ?? null });
 
       return res.status(200).json({
         success: true,
-        message: 'Khuôn mặt hợp lệ, đã gửi lệnh mở cửa',
+        message: door.mqttPublished
+          ? 'Khuôn mặt hợp lệ, đã gửi lệnh mở cửa'
+          : 'Khuôn mặt hợp lệ nhưng chưa gửi được lệnh mở cửa tới Adafruit IO (MQTT chưa kết nối)',
         decision: 'allowed',
         label,
         reliability,
+        distance,
+        ...door,
       });
     }
 
@@ -376,6 +379,7 @@ router.post(
       decision: 'denied',
       label,
       reliability,
+      distance,
     });
   })
 );
@@ -444,12 +448,9 @@ router.post(
       );
 
       const targetDevice = devRows[0];
-      const actualFeedKey =
-        feedKey || targetDevice?.Feed_Key || `device-${targetDeviceId}`;
-      const isFan =
-        actualFeedKey === 'device-fan' ||
-        targetDevice?.Type_Code?.toUpperCase().includes('FAN') ||
-        targetDevice?.Device_Name?.toUpperCase().includes('QUẠT');
+      // Luôn đưa về 1 trong 8 feed chuẩn (bản cũ có thể sinh feed lạ 'device-<id>')
+      const actualFeedKey = resolveValidFeedKey(feedKey || targetDevice?.Feed_Key, targetDevice?.Type_Code, targetDevice?.Device_Name);
+      const isFan = isFanDevice(targetDevice, actualFeedKey);
 
       // Chuẩn hóa MQTT Payload:
       // - Nếu là QUẠT: giữ speed
@@ -457,6 +458,11 @@ router.post(
       const mqttPayload = { ...commandData };
       if (!isFan) {
         delete mqttPayload.speed;
+      }
+      // Cùng định dạng với lệnh từ trang Điều khiển: { action, state, speed? }
+      if (!mqttPayload.action) {
+        const on = String(mqttPayload.state).toUpperCase() === 'ON';
+        mqttPayload.action = !on ? 'TURN_OFF' : isFan && mqttPayload.speed !== undefined ? 'SET_SPEED' : 'TURN_ON';
       }
 
       // Gửi tín hiệu điều khiển qua MQTT Adafruit IO
@@ -472,6 +478,17 @@ router.post(
         'UPDATE Device SET Available_working_State = ? WHERE Device_ID = ?',
         [newWorkingState, targetDeviceId]
       );
+
+      // Ghi lịch sử lệnh + báo các tab đang mở cập nhật công tắc
+      await pool
+        .query(
+          `INSERT INTO Device_Command (Source_ID, Source_Type, Data_attached, Excute_Time, Excute_State, Device_ID)
+           VALUES (?, 'VOICE_COMMAND', ?, NOW(), 'SUCCESS', ?)`,
+          [userId, JSON.stringify(mqttPayload), targetDeviceId]
+        )
+        .catch((err) => console.error('[VOICE] Không ghi được Device_Command:', err.message));
+      const io = req.app.get('io');
+      if (io) io.to(`home_${homeId}`).emit('device_state_updated', { homeId, deviceId: targetDeviceId, state: newWorkingState });
     }
 
     res.status(200).json({
@@ -490,3 +507,4 @@ router.post(
 );
 
 module.exports = router;
+

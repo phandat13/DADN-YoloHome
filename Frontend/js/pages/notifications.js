@@ -138,3 +138,4 @@ export const notificationsPage = {
     return () => { alive = false; };
   },
 };
+

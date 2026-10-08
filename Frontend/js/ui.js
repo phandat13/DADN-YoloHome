@@ -107,3 +107,5 @@ export function toast(msg, tone = 'sky') {
 }
 
 export const fail = (e, prefix = '') => toast(prefix ? `${prefix}: ${e?.message ?? e}` : String(e?.message ?? e), 'rose');
+
+

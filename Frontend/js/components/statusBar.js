@@ -29,3 +29,5 @@ export function renderStatusBar(el, { alerts = [], devices = [], mode = 'auto', 
       <span class="font-mono text-[11px] text-slate-400">Broker: ${DEVICE.broker}</span>
     </div>`;
 }
+
+

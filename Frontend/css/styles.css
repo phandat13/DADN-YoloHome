@@ -22,3 +22,5 @@ body.auth-mode #shell-main { padding-left: 0; }
 
 /* Camera dạng gương cho dễ căn mặt */
 .mirror { transform: scaleX(-1); }
+
+

@@ -48,3 +48,5 @@ export function renderSidebar(el, activeRoute = 'monitor') {
       </div>
     </div>`;
 }
+
+

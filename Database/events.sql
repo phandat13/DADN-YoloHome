@@ -9,3 +9,4 @@ CREATE EVENT IF NOT EXISTS evt_expire_members
 DROP EVENT IF EXISTS evt_check_offline_devices;
 CREATE EVENT IF NOT EXISTS evt_check_offline_devices
     ON SCHEDULE EVERY 1 MINUTE DO CALL sp_check_offline_devices(5);
+

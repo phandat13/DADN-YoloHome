@@ -36,6 +36,8 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 // ---------------- State ----------------
 export const AUTO = 'tự động';
 const emptySensor = () => ({ temperature: null, humidity: null, light: null, motion: null, quality: {}, at: {}, updatedAt: null });
+const HISTORY_SPAN_MS = 864e5;   // biểu đồ dùng dữ liệu 24 giờ gần nhất
+const HISTORY_MAX = 5000;        // số điểm tối đa giữ cho mỗi đại lượng
 const emptyHistory = () => ({ temperature: [], humidity: [], light: [] });
 
 export const state = {
@@ -51,7 +53,8 @@ export const state = {
   history: emptyHistory(),      // chuỗi {ts, value} để vẽ biểu đồ
   mode: 'auto',
   buzzer: false,
-  doorOpen: false,
+  doorOpen: false,              // có cửa đang mở khoá (theo trạng thái Backend)
+  doorLockAt: null,             // thời điểm Backend sẽ tự khoá cửa (ms)
   alerts: [],                   // cảnh báo ngưỡng đang hoạt động
   logs: [],                     // nhật ký cục bộ (cảnh báo, tự động hoá, thao tác)
   unread: 0,
@@ -118,7 +121,7 @@ export async function bootstrap() {
   if (!getToken()) return;
   await loadHomes();
   connectSocket();
-  const saved = localStorage.getItem(LS.home);
+  const saved = lsGet(LS.home, null);
   const target = state.homes.find((h) => sameId(h.id, saved)) ?? state.homes[0];
   const loadingHome = selectHome(target ? target.id : null);   // phần đồng bộ đặt homeId ngay
   state.ready = true;
@@ -142,7 +145,7 @@ export async function loadHomes() {
 function resetHomeState() {
   Object.assign(state, {
     sensors: [], devices: [], doors: [], sensor: emptySensor(), history: emptyHistory(),
-    alerts: [], buzzer: false, doorOpen: false, loading: false, errors: { homes: state.errors.homes },
+    alerts: [], buzzer: false, doorOpen: false, doorLockAt: null, loading: false, errors: { homes: state.errors.homes },
   });
 }
 
@@ -154,12 +157,12 @@ export async function selectHome(id) {
   state.home = home ?? null;
   resetHomeState();
   if (state.homeId == null) {
-    localStorage.removeItem(LS.home);
+    try { localStorage.removeItem(LS.home); } catch {}
     state.logs = [];
     emit('home');
     return;
   }
-  localStorage.setItem(LS.home, String(state.homeId));
+  lsSet(LS.home, state.homeId);
   state.mode = lsGet(LS.mode(state.homeId), 'auto');
   state.logs = lsGet(LS.logs(state.homeId), []);
   devCache = lsGet(LS.dev(state.homeId), {});
@@ -204,31 +207,43 @@ export async function refreshHomeData({ silent = false } = {}) {
   const s = take(sens, 'sensors', normSensor);
   if (s) state.sensors = s;
   const dr = take(doors, 'doors', normDoor);
-  if (dr) state.doors = dr.filter((x) => x.name);
-  await loadReadings(hid);
+  if (dr) { state.doors = dr.filter((x) => x.name); syncDoorOpen(); scheduleDoorRefresh(); }
+  await loadReadings(hid, { full: !silent });
   if (!sameId(hid, state.homeId)) return;
   state.loading = false;
   evaluate();
-  ['devices', 'sensors', 'doors', 'sensor', 'history', 'loading'].forEach(emit);
+  ['devices', 'sensors', 'doors', 'door', 'sensor', 'history', 'loading'].forEach(emit);
+}
+
+// Gộp điểm mới vào chuỗi cũ (bỏ trùng theo thời điểm), giữ 24 giờ gần nhất.
+function mergeSeries(oldPts, newPts) {
+  const byTs = new Map();
+  for (const p of oldPts) byTs.set(p.ts, p);
+  for (const p of newPts) byTs.set(p.ts, p);
+  const since = Date.now() - HISTORY_SPAN_MS;
+  return [...byTs.values()].filter((p) => p.ts >= since).sort((a, b) => a.ts - b.ts).slice(-HISTORY_MAX);
 }
 
 // GET /iot/sensors/:sensorId/records → giá trị mới nhất + chuỗi lịch sử cho biểu đồ.
-async function loadReadings(hid) {
+// full: tải lại toàn bộ 24 giờ (khi mở nhà / bấm Tải lại); ngược lại chỉ lấy bản ghi mới nhất rồi gộp vào.
+async function loadReadings(hid, { full = true } = {}) {
   const jobs = ['temperature', 'humidity', 'light', 'motion'].map(async (kind) => {
     const sensor = state.sensors.find((x) => x.kind === kind);
     if (!sensor) return [kind, null];
-    try { return [kind, asList(await api.iot.records(hid, sensor.id), 'records').map(normRecord)]; }
+    const needAll = kind in state.history && (full || !state.history[kind].length);
+    const query = needAll
+      ? { from: new Date(Date.now() - HISTORY_SPAN_MS).toISOString(), limit: HISTORY_MAX }
+      : { limit: 100 };
+    try { return [kind, asList(await api.iot.records(hid, sensor.id, query), 'records').map(normRecord), needAll]; }
     catch { return [kind, null]; }
   });
-  for (const [kind, recs] of await Promise.all(jobs)) {
+  for (const [kind, recs, replaced] of await Promise.all(jobs)) {
     if (!recs?.length || !sameId(hid, state.homeId)) continue;
     const timed = recs.filter((r) => r.ts != null).sort((a, b) => a.ts - b.ts);
     const latest = timed.length ? timed[timed.length - 1] : recs[recs.length - 1];
     if (kind in state.history && timed.length) {
-      state.history[kind] = timed
-        .map((r) => ({ ts: r.ts, value: Number(r.value) }))
-        .filter((p) => Number.isFinite(p.value))
-        .slice(-3000);
+      const pts = timed.map((r) => ({ ts: r.ts, value: Number(r.value) })).filter((p) => Number.isFinite(p.value));
+      state.history[kind] = replaced ? pts.slice(-HISTORY_MAX) : mergeSeries(state.history[kind], pts);
     }
     const ts = latest.ts ?? Date.now();
     if (!state.sensor.at[kind] || ts >= state.sensor.at[kind]) setReading(kind, latest.value, latest.quality, latest.ts);
@@ -244,7 +259,7 @@ function setReading(kind, raw, quality, ts) {
     v = kind === 'light' ? Math.round(v) : Math.round(v * 10) / 10;
   }
   state.sensor[kind] = v;
-  state.sensor.quality[kind] = quality || 'GOOD';
+  state.sensor.quality[kind] = String(quality || 'GOOD').toUpperCase();   // BE trả 'good' | 'bad' | 'uncertain'
   state.sensor.at[kind] = ts ?? null;
   state.sensor.updatedAt = Math.max(state.sensor.updatedAt ?? 0, ts ?? 0) || null;
   return true;
@@ -269,11 +284,14 @@ function connectSocket() {
   // LẮNG NGHE SỰ KIỆN ĐỒNG BỘ THIẾT BỊ TỪ BACKEND / CÁC CLIENT KHÁC
   socket.on('device_update', onDeviceUpdate);
   socket.on('device_state', onDeviceUpdate);
+  socket.on('device_state_updated', onDeviceUpdate);   // tên sự kiện Backend thực sự phát (điều khiển + giọng nói)
+  socket.on('door_state_updated', onDoorUpdate);       // mở khoá / khoá tay / tự khoá
 }
 
 // Payload: { deviceId, state, speed, working }
 function onDeviceUpdate(data) {
   if (!data || state.homeId == null) return;
+  if (data.homeId != null && !sameId(data.homeId, state.homeId)) return;
   const devId = data.deviceId || data.Device_ID || data.id;
   const target = state.devices.find((d) => String(d.id) === String(devId));
   if (!target) {
@@ -316,7 +334,7 @@ function onSensorUpdate(data) {
   const series = state.history[kind];
   if (series) {
     series.push({ ts, value: Number(state.sensor[kind]) });
-    if (series.length > 3000) series.splice(0, series.length - 3000);
+    if (series.length > HISTORY_MAX) series.splice(0, series.length - HISTORY_MAX);
   }
   evaluate();
   emit('sensor'); emit('history');
@@ -386,12 +404,55 @@ export function setMode(mode, reason = '') {
 }
 
 // ---------------- Cửa ----------------
-export function markDoorOpened(source, doorName = '') {
-  state.doorOpen = true;
-  addLog('door', `Cửa${doorName ? ` "${doorName}"` : ''} mở lúc ${hhmm(Date.now())} bằng ${source}`);
-  emit('door');
+// Backend tự khoá cửa sau DOOR_AUTO_LOCK_SECONDS (mặc định 10s) và gửi LOCK_DOOR lên feed Adafruit 'smart-door'.
+// Giao diện chỉ hiển thị theo trạng thái Backend: sự kiện Socket.IO 'door_state_updated' hoặc tải lại.
+function syncDoorOpen() {
+  const open = state.doors.filter((d) => /unlocked/i.test(d.state));
+  state.doorOpen = open.length > 0;
+  const times = open.map((d) => d.autoLockAt).filter(Boolean);
+  state.doorLockAt = times.length ? Math.min(...times) : null;
+}
+
+// Lỡ sự kiện socket (mất mạng...) -> tự tải lại trạng thái cửa sau thời điểm khoá dự kiến
+function scheduleDoorRefresh() {
   clearTimeout(doorTimer);
-  doorTimer = setTimeout(() => { state.doorOpen = false; emit('door'); }, TIMING.DOOR_OPEN_MS);
+  if (state.doorLockAt && state.doorLockAt > Date.now() - 1000) {
+    doorTimer = setTimeout(() => refreshHomeData({ silent: true }), state.doorLockAt - Date.now() + 3000);
+  }
+}
+
+function setDoorState(doorName, lockState, lockAt = null) {
+  const d = state.doors.find((x) => x.name === doorName);
+  if (d) {
+    d.state = lockState === 'unlocked' ? 'Unlocked' : 'Locked';
+    d.autoLockAt = lockState === 'unlocked' ? lockAt : null;
+  }
+  syncDoorOpen();
+  scheduleDoorRefresh();
+  emit('door'); emit('doors');
+}
+
+// info: phần data trong phản hồi API mở cửa ({ autoLockAt, autoLockSeconds, mqttPublished })
+export function markDoorOpened(source, doorName = '', info = {}) {
+  const lockAt = toTs(info?.autoLockAt);
+  addLog('door', `Cửa${doorName ? ` "${doorName}"` : ''} mở lúc ${hhmm(Date.now())} bằng ${source}`
+    + (lockAt ? ` — tự khoá sau ${Math.max(0, Math.round((lockAt - Date.now()) / 1000))}s` : ''));
+  setDoorState(doorName, 'unlocked', lockAt);
+}
+
+export function markDoorLocked(doorName = '') {
+  setDoorState(doorName, 'locked');
+}
+
+// Payload: { homeId, doorName, state: 'unlocked' | 'locked', source: 'pin' | 'face' | 'remote' | 'auto', autoLockAt }
+function onDoorUpdate(data) {
+  if (!data || state.homeId == null) return;
+  if (data.homeId != null && !sameId(data.homeId, state.homeId)) return;
+  const lockState = String(data.state).toLowerCase() === 'unlocked' ? 'unlocked' : 'locked';
+  if (lockState === 'locked' && data.source === 'auto') {
+    addLog('door', `Cửa "${data.doorName}" tự khoá lúc ${hhmm(Date.now())} (đã gửi LOCK_DOOR lên Adafruit)`);
+  }
+  setDoorState(data.doorName, lockState, toTs(data.autoLockAt));
 }
 
 // ---------------- Ngưỡng + tự động hoá ----------------
@@ -460,3 +521,4 @@ export async function initStore() {
   Object.assign(THRESHOLDS, lsGet(LS.thresholds, {}));
   await bootstrap();
 }
+

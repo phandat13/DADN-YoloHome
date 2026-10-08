@@ -7,8 +7,14 @@ function notFound(req, res, next) {
 }
 
 function errorHandler(err, req, res, next) {
-  let statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  // Lỗi có sẵn mã HTTP (VD: body JSON sai cú pháp -> 400, body quá lớn -> 413) giữ nguyên mã đó
+  const presetStatus = err.status || err.statusCode;
+  let statusCode = presetStatus >= 400 && presetStatus < 600 ? presetStatus : (res.statusCode === 200 ? 500 : res.statusCode);
   let message = err.message || 'Lỗi máy chủ nội bộ';
+
+  if (err.type === 'entity.parse.failed') {
+    message = 'Dữ liệu JSON gửi lên không đúng cú pháp';
+  }
 
   // 1. Lỗi logic chủ động từ MySQL Trigger/Procedure (SIGNAL SQLSTATE '45000')
   if (err.sqlState === '45000') {
@@ -26,6 +32,10 @@ function errorHandler(err, req, res, next) {
     message = 'Dữ liệu liên kết không hợp lệ hoặc đang được tham chiếu';
   }
 
+  if (statusCode >= 500) {
+    console.error(`[ERROR] ${req.method} ${req.originalUrl}:`, err);
+  }
+
   res.status(statusCode).json({
     success: false,
     message,
@@ -37,3 +47,4 @@ module.exports = {
   notFound,
   errorHandler
 };
+

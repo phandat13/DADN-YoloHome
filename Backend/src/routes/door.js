@@ -8,8 +8,12 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const auth = require('../middlewares/auth');
 const checkPermission = require('../middlewares/permission');
 const validate = require('../middlewares/validate');
-const { publishCommand } = require('../services/mqttService');
+const { isMqttConnected } = require('../services/mqttService');
+const { doorUnlocked, doorLocked, getAutoLockAt } = require('../services/doorAutoLock');
 const config = require('../config');
+const { toMysqlDatetime, optionalDateSchema } = require('../utils/datetime');
+const { requireDoorInHome } = require('../utils/doors');
+
 
 // ==========================================
 // 0. HELPER FUNCTIONS & MIDDLEWARES
@@ -21,7 +25,8 @@ const pinLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   validate: { keyGeneratorIpFallback: false },
-  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}_${req.params.doorName || 'default'}`,
+  skipSuccessfulRequests: true, // chỉ đếm lần nhập SAI (đúng như thông báo "sai 5 lần")
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}_${req.params.homeId}_${req.params.doorName || 'default'}`,
   handler: (req, res) => {
     res.status(429).json({
       success: false,
@@ -30,32 +35,9 @@ const pinLimiter = rateLimit({
   },
 });
 
-// Cho phép cả thiết bị phần cứng IoT (x-iot-key) lẫn giao diện Web (Token người dùng hoặc công khai)
-const allowIotOrAuth = (req, res, next) => {
-  const clientKey = req.headers['x-iot-key'];
-  if (config.iotApiKey && clientKey === config.iotApiKey) {
-    return next();
-  }
-
-  // Nếu request có Header Authorization của người dùng Web thì xác thực JWT
-  if (req.headers.authorization) {
-    return auth(req, res, next);
-  }
-
-  // Cho phép tiếp tục nếu hệ thống mở cửa bảo mật thông qua rate-limit và mã PIN
-  next();
-};
-
 // Lấy trực tiếp doorName đã được Express tự giải mã an toàn
 const getDoorName = (req) => req.params.doorName;
 
-// Chuyển chuỗi ISO sang chuỗi MySQL DATETIME (YYYY-MM-DD HH:mm:ss)
-const toMysqlDatetime = (dateStr) => {
-  if (!dateStr) return null;
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 19).replace('T', ' ');
-};
 
 // Trích xuất biến OUT từ kết quả Stored Procedure
 const extractOutValue = (outResult, paramName) => {
@@ -69,14 +51,13 @@ const extractOutValue = (outResult, paramName) => {
 // 1. ZOD SCHEMAS
 // ==========================================
 
-const dateSchema = z
-  .union([
-    z.string().datetime({ offset: true }),
-    z.string().datetime(),
-    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Định dạng ngày phải là YYYY-MM-DD'),
-  ])
-  .nullable()
-  .optional();
+const dateSchema = optionalDateSchema;
+
+// "12" (chuỗi từ form) -> 12
+const intLike = z.preprocess(
+  (v) => (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : v),
+  z.number().int({ message: 'Phải là số nguyên' })
+);
 
 const createDoorSchema = z.object({
   body: z.object({
@@ -87,7 +68,7 @@ const createDoorSchema = z.object({
 
 const createPinSchema = z.object({
   body: z.object({
-    targetUserId: z.number().int({ message: 'User ID phải là số nguyên' }).optional().nullable(),
+    targetUserId: intLike.optional().nullable(),
     pin: z.string().regex(/^[0-9]{4,8}$/, 'Mã PIN phải gồm từ 4 đến 8 chữ số'),
     validFrom: dateSchema,
     validTo: dateSchema,
@@ -100,13 +81,18 @@ const verifyPinSchema = z.object({
   }),
 });
 
+// Bàn phím trên web chỉ biết mã cũ + mã mới (không biết credentialId) -> credentialId không bắt buộc,
+// chấp nhận cả tên trường oldPin, và confirmPin mặc định bằng newPin (bàn phím đã tự so 2 lần nhập).
 const changePinSchema = z.object({
-  body: z.object({
-    credentialId: z.number().int(),
-    currentPin: z.string().min(1, 'Vui lòng nhập mã PIN hiện tại'),
-    newPin: z.string().regex(/^[0-9]{4,8}$/, 'Mã PIN mới phải gồm 4 đến 8 chữ số'),
-    confirmPin: z.string().regex(/^[0-9]{4,8}$/, 'Xác nhận mã PIN mới phải gồm 4 đến 8 chữ số'),
-  }),
+  body: z
+    .object({
+      credentialId: intLike.optional().nullable(),
+      currentPin: z.string().min(1).optional(),
+      oldPin: z.string().min(1).optional(),
+      newPin: z.string().regex(/^[0-9]{4,8}$/, 'Mã PIN mới phải gồm 4 đến 8 chữ số'),
+      confirmPin: z.string().regex(/^[0-9]{4,8}$/, 'Xác nhận mã PIN mới phải gồm 4 đến 8 chữ số').optional(),
+    })
+    .refine((b) => b.currentPin || b.oldPin, { message: 'Vui lòng nhập mã PIN hiện tại', path: ['currentPin'] }),
 });
 
 const setDoorStateSchema = z.object({
@@ -134,10 +120,21 @@ router.post(
     const homeId = parseInt(req.params.homeId, 10);
     const { doorName, workingState } = req.body;
 
-    await pool.execute(
-      'INSERT INTO Smart_Door (Smart_Door_Name, Working_State, Lock_Unlock_State, Home_ID) VALUES (?, ?, ?, ?)',
-      [doorName, workingState || 'enabled', 'Locked', homeId]
-    );
+    try {
+      await pool.execute(
+        'INSERT INTO Smart_Door (Smart_Door_Name, Working_State, Lock_Unlock_State, Home_ID) VALUES (?, ?, ?, ?)',
+        [doorName, workingState || 'enabled', 'Locked', homeId]
+      );
+    } catch (err) {
+      if (err.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({
+          success: false,
+          message: `Tên cửa "${doorName}" đã được sử dụng. Tên cửa phải là duy nhất, hãy đặt tên khác (VD: "${doorName} - nhà 2").`,
+        });
+      }
+      throw err;
+    }
+    await pool.query('CALL sp_log_activity(?, ?, ?, ?, ?, ?)', [req.user.User_ID, homeId, 'smart_door', 'create_door', 'web', 'success']);
 
     res.status(201).json({
       success: true,
@@ -178,6 +175,13 @@ router.get(
       [homeId]
     );
 
+    // Cửa đang mở: kèm thời điểm sẽ tự khoá để giao diện hiển thị đếm ngược
+    for (const d of doors) {
+      const lockAt = getAutoLockAt(d.doorName);
+      d.autoLockAt = lockAt ? new Date(lockAt).toISOString() : null;
+      d.autoLockSeconds = config.doorAutoLockSeconds;
+    }
+
     res.status(200).json({
       success: true,
       data: doors,
@@ -193,6 +197,7 @@ router.get(
   '/:doorName/credentials',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   asyncHandler(async (req, res) => {
     const homeId = parseInt(req.params.homeId, 10);
     const doorName = getDoorName(req);
@@ -205,11 +210,12 @@ router.get(
         u.Display_name AS displayName,
         ac.Valid_From AS validFrom,
         ac.Valid_To AS validTo,
-        ac.State AS state
+        ac.Credential_State AS state
        FROM Access_Credential ac
        JOIN Smart_Door sd ON ac.Smart_Door_Name = sd.Smart_Door_Name
        JOIN \`User\` u ON ac.User_ID = u.User_ID
-       WHERE sd.Home_ID = ? AND ac.Smart_Door_Name = ?`,
+       WHERE sd.Home_ID = ? AND ac.Smart_Door_Name = ?
+       ORDER BY ac.Credential_ID DESC`,
       [homeId, doorName]
     );
 
@@ -228,6 +234,7 @@ router.post(
   '/:doorName/pins',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   validate(createPinSchema),
   asyncHandler(async (req, res) => {
     const actorId = req.user.User_ID ?? req.user.userId;
@@ -235,8 +242,8 @@ router.post(
     const { targetUserId, pin, validFrom = null, validTo = null } = req.body;
 
     const finalUserId = targetUserId || actorId;
-    const formattedValidFrom = toMysqlDatetime(validFrom);
-    const formattedValidTo = toMysqlDatetime(validTo);
+    const formattedValidFrom = toMysqlDatetime(validFrom, { dateOnly: 'start' });
+    const formattedValidTo = toMysqlDatetime(validTo, { dateOnly: 'end' });
 
     const outResult = await callProc(
       'sp_create_access_credential',
@@ -267,6 +274,7 @@ router.post(
 router.post(
   '/:doorName/verify-pin',
   pinLimiter,
+  requireDoorInHome,
   validate(verifyPinSchema),
   asyncHandler(async (req, res) => {
     const doorName = getDoorName(req);
@@ -297,16 +305,19 @@ router.post(
       });
     }
 
-    // Gửi lệnh mở chốt cửa qua MQTT tới mạch điều khiển
-    const feedKey = `smart-door`;
-    publishCommand(feedKey, { action: 'UNLOCK_DOOR', doorName, userId });
+    // Gửi UNLOCK_DOOR lên feed + hẹn giờ tự khoá (sẽ gửi LOCK_DOOR lên feed khi hết giờ)
+    const homeId = parseInt(req.params.homeId, 10);
+    const door = doorUnlocked({ io: req.app.get('io'), homeId, doorName, source: 'pin', userId });
 
     res.status(200).json({
       success: true,
-      message: 'Mở cửa thành công',
+      message: door.mqttPublished
+        ? 'Mở cửa thành công'
+        : 'Mã PIN đúng nhưng chưa gửi được lệnh mở cửa tới Adafruit IO (MQTT chưa kết nối)',
       data: {
         result,
         userId,
+        ...door,
       },
     });
   })
@@ -320,10 +331,40 @@ router.put(
   '/:doorName/change-pin',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   validate(changePinSchema),
   asyncHandler(async (req, res) => {
     const actorId = req.user.User_ID ?? req.user.userId;
-    const { credentialId, currentPin, newPin, confirmPin } = req.body;
+    const doorName = getDoorName(req);
+    const currentPin = req.body.currentPin ?? req.body.oldPin;
+    const { newPin } = req.body;
+    const confirmPin = req.body.confirmPin ?? newPin;
+    let credentialId = req.body.credentialId;
+
+    if (credentialId) {
+      // Credential phải thuộc đúng cửa trong URL
+      const [own] = await pool.query(
+        'SELECT 1 FROM Access_Credential WHERE Credential_ID = ? AND Smart_Door_Name = ? LIMIT 1',
+        [credentialId, doorName]
+      );
+      if (own.length === 0) {
+        return res.status(404).json({ success: false, message: 'Mã PIN không thuộc cửa này' });
+      }
+    } else {
+      // Không có credentialId: tìm mã PIN đang hoạt động của cửa khớp với mã hiện tại (ưu tiên của chính mình)
+      const [found] = await pool.query(
+        `SELECT Credential_ID FROM Access_Credential
+         WHERE Smart_Door_Name = ? AND LOWER(Credential_State) = 'active'
+           AND Credential_Value = fn_hash_pin(Smart_Door_Name, User_ID, ?)
+         ORDER BY (User_ID = ?) DESC, Credential_ID DESC
+         LIMIT 1`,
+        [doorName, currentPin, actorId]
+      );
+      if (found.length === 0) {
+        return res.status(400).json({ success: false, message: 'Mật mã hiện tại không đúng' });
+      }
+      credentialId = found[0].Credential_ID;
+    }
 
     await callProc(
       'sp_change_door_pin',
@@ -346,9 +387,20 @@ router.delete(
   '/:doorName/credentials/:credentialId',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   asyncHandler(async (req, res) => {
     const actorId = req.user.User_ID ?? req.user.userId;
     const credentialId = parseInt(req.params.credentialId, 10);
+    if (Number.isNaN(credentialId)) {
+      return res.status(400).json({ success: false, message: 'credentialId phải là số nguyên' });
+    }
+    const [own] = await pool.query(
+      'SELECT 1 FROM Access_Credential WHERE Credential_ID = ? AND Smart_Door_Name = ? LIMIT 1',
+      [credentialId, getDoorName(req)]
+    );
+    if (own.length === 0) {
+      return res.status(404).json({ success: false, message: 'Mã PIN không tồn tại ở cửa này' });
+    }
 
     await callProc('sp_revoke_credential', [actorId, credentialId], []);
 
@@ -367,25 +419,39 @@ router.post(
   '/:doorName/unlock',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   validate(setDoorStateSchema),
   asyncHandler(async (req, res) => {
     const actorId = req.user.User_ID ?? req.user.userId;
     const doorName = getDoorName(req);
+    const homeId = parseInt(req.params.homeId, 10);
     const { state } = req.body;
+
+    // Không gửi được lệnh lên Adafruit thì không đổi trạng thái trong DB (cửa thật không nhận được lệnh)
+    if (!isMqttConnected()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Không gửi được lệnh tới Adafruit IO (MQTT chưa kết nối). Kiểm tra MQTT_USERNAME / MQTT_KEY và mạng.',
+      });
+    }
 
     await callProc('sp_set_door_state', [actorId, doorName, state], []);
 
-    // Đồng bộ phát lệnh MQTT tới mạch điều khiển cửa
-    const feedKey = `door-${encodeURIComponent(doorName)}`;
-    const mqttAction = state === 'unlocked' ? 'UNLOCK_DOOR' : 'LOCK_DOOR';
-    publishCommand(feedKey, { action: mqttAction, doorName });
+    // Gửi lệnh lên feed chuẩn 'smart-door'; mở khoá thì hẹn giờ tự khoá, khoá tay thì huỷ hẹn giờ
+    const io = req.app.get('io');
+    const door = state === 'unlocked'
+      ? doorUnlocked({ io, homeId, doorName, source: 'remote', userId: actorId })
+      : doorLocked({ io, homeId, doorName, source: 'remote' });
 
     res.status(200).json({
       success: true,
-      message: `Đã ${state === 'unlocked' ? 'mở khóa' : 'khóa'} cửa từ xa thành công`,
+      message: state === 'unlocked'
+        ? `Đã mở khoá cửa từ xa${door.autoLockSeconds ? `, tự khoá sau ${door.autoLockSeconds} giây` : ''}`
+        : 'Đã khoá cửa từ xa',
       data: {
         doorName,
         state,
+        ...door,
       },
     });
   })
@@ -399,6 +465,7 @@ router.get(
   '/:doorName/attempts',
   auth,
   checkPermission('DOOR_MANAGE'),
+  requireDoorInHome,
   asyncHandler(async (req, res) => {
     const homeId = parseInt(req.params.homeId, 10);
     const doorName = getDoorName(req);
@@ -411,12 +478,14 @@ router.get(
         aa.Access_Result AS accessResult,
         aa.Failure_Reason AS failureReason,
         aa.User_ID AS userId,
+        COALESCE(u.Display_name, u.Name) AS userName,
         aa.\`Time\` AS \`time\`,
         aa.Smart_Door_Name AS doorName
       FROM Access_Attempt aa
       JOIN Smart_Door sd ON aa.Smart_Door_Name = sd.Smart_Door_Name
+      LEFT JOIN \`User\` u ON u.User_ID = aa.User_ID
       WHERE sd.Home_ID = ? AND aa.Smart_Door_Name = ?
-      ORDER BY aa.\`Time\` DESC
+      ORDER BY aa.\`Time\` DESC, aa.Access_ID DESC
       LIMIT ${Number(limit)}
     `;
 
@@ -430,3 +499,4 @@ router.get(
 );
 
 module.exports = router;
+

@@ -336,7 +336,7 @@ BEGIN
             WHERE User_ID = (SELECT Owner_ID FROM Home WHERE Home_ID = v_home)
               AND Title = 'Thiết bị thay đổi trạng thái'
               AND Content LIKE CONCAT('%"', v_name, '"%')
-              AND TIMESTAMPDIFF(SECOND, Time, NOW()) <= 5;
+              AND Created_At >= NOW() - INTERVAL 5 SECOND;
 
             -- Nếu chưa có thông báo gần đây thì mới tạo
             IF v_recent_count = 0 THEN
@@ -381,8 +381,10 @@ END$$
 DROP TRIGGER IF EXISTS trg_device_command_ai$$
 CREATE TRIGGER trg_device_command_ai AFTER INSERT ON Device_Command FOR EACH ROW
 BEGIN
+    -- Source_ID là User_ID của người ra lệnh (web hoặc giọng nói); lịch/hệ thống thì báo chủ nhà
     IF LOWER(NEW.Excute_State) = 'failed' THEN
-        CALL sp_notify(fn_command_requester(NEW.Source_Type, NEW.Source_ID),
+        CALL sp_notify(IF(UPPER(NEW.Source_Type) IN ('USER', 'VOICE_COMMAND'), NEW.Source_ID,
+                          (SELECT h.Owner_ID FROM Device d JOIN Home h ON h.Home_ID = d.Home_ID WHERE d.Device_ID = NEW.Device_ID)),
             'Lệnh điều khiển thất bại', 'command_alert',
             CONCAT('Lệnh #', NEW.Command_ID, ' gửi tới thiết bị ID ', NEW.Device_ID, ' thất bại.'), 'warning');
     END IF;
@@ -402,7 +404,8 @@ BEGIN
             END IF;
         END IF;
     ELSEIF LOWER(OLD.Excute_State) = 'pending' AND LOWER(NEW.Excute_State) = 'failed' THEN
-        CALL sp_notify(fn_command_requester(NEW.Source_Type, NEW.Source_ID),
+        CALL sp_notify(IF(UPPER(NEW.Source_Type) IN ('USER', 'VOICE_COMMAND'), NEW.Source_ID,
+                          (SELECT h.Owner_ID FROM Device d JOIN Home h ON h.Home_ID = d.Home_ID WHERE d.Device_ID = NEW.Device_ID)),
             'Lệnh điều khiển thất bại', 'command_alert',
             CONCAT('Lệnh #', NEW.Command_ID, ' gửi tới thiết bị ID ', NEW.Device_ID, ' thất bại.'), 'warning');
     END IF;
@@ -427,3 +430,5 @@ BEGIN
 END$$
 
 DELIMITER ;
+
+

@@ -6,27 +6,15 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const validate = require('../middlewares/validate');
 const auth = require('../middlewares/auth');
 const requirePermission = require('../middlewares/permission');
+const { toMysqlDatetime, optionalDateSchema } = require('../utils/datetime');
 
 const router = express.Router({ mergeParams: true });
 
 router.use(auth);
 
-// ==========================================
-// 0. HÀM CHUYỂN ĐỔI NGÀY SANG MYSQL DATETIME
-// ==========================================
-const formatToMysqlDatetime = (dateVal) => {
-  if (!dateVal) return null;
-  const d = new Date(dateVal);
-  if (Number.isNaN(d.getTime())) return null;
-
-  // Nếu input gửi lên là dạng chỉ có ngày YYYY-MM-DD từ datepicker
-  // Đặt thời gian đến 23:59:59 của ngày đó để Guest sử dụng trọn vẹn ngày
-  if (typeof dateVal === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateVal)) {
-    d.setHours(23, 59, 59, 999);
-  }
-
-  return d.toISOString().slice(0, 19).replace('T', ' ');
-};
+// Ngày dạng YYYY-MM-DD từ datepicker -> 23:59:59 của ngày đó (giờ địa phương) để Guest dùng trọn ngày.
+// (Bản cũ dùng toISOString() nên thành 16:59:59 ở VN, và chuỗi rỗng "" bị từ chối 400.)
+const formatToMysqlDatetime = (dateVal) => toMysqlDatetime(dateVal, { dateOnly: 'end' });
 
 // ==========================================
 // 1. SCHEMA KIỂM TRA DỮ LIỆU (ZOD)
@@ -38,15 +26,7 @@ const homeIdParamSchema = z.object({
 });
 
 // Cho phép chuỗi ISO đầy đủ, chuỗi ngày YYYY-MM-DD, null hoặc chuỗi rỗng
-const dateSchema = z
-  .union([
-    z.string().datetime({ offset: true }),
-    z.string().datetime(),
-    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Định dạng ngày phải là YYYY-MM-DD'),
-  ])
-  .nullable()
-  .optional()
-  .transform((val) => (val === '' ? undefined : val));
+const dateSchema = optionalDateSchema;
 
 const addMemberSchema = z.object({
   params: z.object({
@@ -55,7 +35,7 @@ const addMemberSchema = z.object({
   body: z.object({
     email: z.string().email('Email thành viên không hợp lệ'),
     roleName: z.enum(['Member', 'Guest'], {
-      errorMap: () => ({ message: 'Vai trò chỉ có thể là Member hoặc Guest' }),
+      error: 'Vai trò chỉ có thể là Member hoặc Guest', // Zod 4 dùng `error` (errorMap của Zod 3 bị bỏ qua)
     }),
     expired: dateSchema,
   }),
@@ -68,7 +48,7 @@ const changeRoleSchema = z.object({
   }),
   body: z.object({
     roleName: z.enum(['Member', 'Guest'], {
-      errorMap: () => ({ message: 'Vai trò chỉ có thể là Member hoặc Guest' }),
+      error: 'Vai trò chỉ có thể là Member hoặc Guest', // Zod 4 dùng `error` (errorMap của Zod 3 bị bỏ qua)
     }),
     expired: dateSchema,
   }),
@@ -179,3 +159,4 @@ router.delete('/:userId', validate(memberParamSchema), requirePermission('MEMBER
 }));
 
 module.exports = router;
+

@@ -9,13 +9,18 @@ from Adafruit_IO import MQTTClient
 ADAFRUIT_AIO_USERNAME = "phandat13"
 ADAFRUIT_AIO_KEY = "aio_QRRI79CTPemWpRatb3NCR9Fd3XCb"
 
+# Danh sách Feed
 FEED_TEMP = "sensor-temperature"
+FEED_HUMI = "sensor-humidity"
+FEED_LIGHT = "sensor-light"
 
 # MQTT Callbacks
 def connected(client):
     print("Connected to Adafruit IO!")
     client.subscribe(FEED_TEMP)
-    print("Subscribed to:", FEED_TEMP)
+    client.subscribe(FEED_HUMI)
+    client.subscribe(FEED_LIGHT)
+    print("Subscribed to feeds:", FEED_TEMP, FEED_HUMI, FEED_LIGHT)
 
 def subscribe(client, userdata, mid, granted_qos):
     print("Subscribed successfully!")
@@ -59,13 +64,22 @@ if port_name != "None":
 else:
     print("No compatible serial device found.")
 
-# Xử lý chuỗi dữ liệu nhận được dạng !ID:TEMP:VALUE#
+# Xử lý chuỗi dữ liệu nhận được từ Serial: !ID:TYPE:VALUE#
+# Ví dụ: !1:TEMP:28#, !1:HUMI:75#, !1:LIGHT:300#
 def processData(data):
     data = data.replace("!", "").replace("#", "")
     splitData = data.split(":")
     print("Parsed Data:", splitData)
-    if len(splitData) >= 3 and splitData[1] == "TEMP":
-        client.publish(FEED_TEMP, splitData[2])
+    if len(splitData) >= 3:
+        sensor_type = splitData[1]
+        sensor_val = splitData[2]
+
+        if sensor_type == "TEMP":
+            client.publish(FEED_TEMP, sensor_val)
+        elif sensor_type == "HUMI":
+            client.publish(FEED_HUMI, sensor_val)
+        elif sensor_type == "LIGHT":
+            client.publish(FEED_LIGHT, sensor_val)
 
 mess = ""
 def readSerial():
@@ -87,14 +101,21 @@ def readSerial():
 # Vòng lặp chính
 last_publish = 0
 while True:
-    # 1. Đọc dữ liệu từ Serial liên tục
+    # 1. Đọc dữ liệu từ Serial Microbit liên tục
     readSerial()
 
-    # 2. Gửi dữ liệu định kỳ mỗi 30 giây (không dùng time.sleep dài để tránh block serial)
-    if time.time() - last_publish >= 30:
-        value = random.randint(0, 100)
-        print("Cap nhat ngau nhien:", value)
-        client.publish(FEED_TEMP, value)
+    # 2. Gửi dữ liệu mẫu ngẫu nhiên định kỳ mỗi 5 giây
+    if time.time() - last_publish >= 10:
+        temp_val = random.randint(20, 40)       # Nhiệt độ: 20 - 40 °C
+        humi_val = random.randint(40, 90)       # Độ ẩm: 40 - 90 %
+        light_val = random.randint(100, 1000)   # Ánh sáng: 100 - 1000 lux
+
+        print(f"Cap nhat ngau nhien -> Temp: {temp_val}, Humi: {humi_val}, Light: {light_val}")
+        
+        client.publish(FEED_TEMP, temp_val)
+        client.publish(FEED_HUMI, humi_val)
+        client.publish(FEED_LIGHT, light_val)
+
         last_publish = time.time()
 
     time.sleep(0.1)

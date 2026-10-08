@@ -132,10 +132,10 @@ CREATE FUNCTION fn_latest_sensor_value(p_sensor_id INT)
 RETURNS DOUBLE READS SQL DATA
 BEGIN
     DECLARE v_val DOUBLE DEFAULT NULL;
-    SELECT `Value` INTO v_val 
+    SELECT Sensor_Value INTO v_val
     FROM Sensor_Record
-    WHERE Sensor_ID = p_sensor_id 
-    ORDER BY Recorded_At DESC, Record_ID DESC 
+    WHERE Sensor_ID = p_sensor_id
+    ORDER BY Time_Stamp DESC, Record_ID DESC
     LIMIT 1;
     RETURN v_val;
 END$$
@@ -179,4 +179,6 @@ BEGIN
 END$$
 
 DELIMITER ;
+
+
 

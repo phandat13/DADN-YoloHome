@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router({ mergeParams: true });
 const auth = require('../middlewares/auth');
-const { checkPermission } = require('../middlewares/permission');
 const asyncHandler = require('../middlewares/asyncHandler');
 const { pool } = require('../db');
 
@@ -16,6 +15,9 @@ router.get(
   asyncHandler(async (req, res) => {
     const userId = req.user.User_ID;
     const homeId = parseInt(req.params.homeId, 10);
+    if (Number.isNaN(homeId)) {
+      return res.status(400).json({ success: false, message: 'homeId phải là số nguyên' });
+    }
 
     // 1. Kiểm tra xem user có quyền xem toàn bộ hay chỉ xem của mình
     const [permRows] = await pool.query(
@@ -71,3 +73,4 @@ router.get(
 );
 
 module.exports = router;
+

@@ -326,26 +326,6 @@ BEGIN
   WHERE Command_ID = p_command_id;
 END$$
 
--- 3. SP kiểm tra thiết bị mất kết nối: dùng chuẩn 'online' / 'offline'
-DROP PROCEDURE IF EXISTS `sp_check_offline_devices`$$
-CREATE PROCEDURE `sp_check_offline_devices`(
-  IN p_timeout_minutes INT
-)
-BEGIN
-  DECLARE v_timeout INT DEFAULT 5;
-  IF p_timeout_minutes IS NOT NULL AND p_timeout_minutes > 0 THEN
-    SET v_timeout = p_timeout_minutes;
-  END IF;
-
-  UPDATE Device
-  SET Connection_State = 'offline'
-  WHERE Connection_State = 'online'
-    AND (
-      Last_Connection_Time IS NULL 
-      OR Last_Connection_Time < (NOW() - INTERVAL v_timeout MINUTE)
-    );
-END$$
- 
 -- ===== Giám sát môi trường (6.4) =====
 -- Yolo gửi dữ liệu: backend xác định thiết bị/cảm biến theo Hardware_ID + loại dữ liệu
 DROP PROCEDURE IF EXISTS sp_ingest_sensor_data$$
@@ -364,7 +344,9 @@ BEGIN
     IF v_sensor IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Thiết bị không có cảm biến loại dữ liệu này';
     END IF;
-    INSERT INTO Sensor_Record (`Value`, Data_quality, Sensor_ID) VALUES (p_value, p_quality, v_sensor);
+    INSERT INTO Sensor_Record (Sensor_Value, Data_Quality, Sensor_ID)
+    VALUES (p_value, COALESCE(LOWER(p_quality), 'good'), v_sensor);
+    UPDATE Sensor SET Current_Value = p_value WHERE Sensor_ID = v_sensor;
 END$$
 
 DROP PROCEDURE IF EXISTS sp_yolo_heartbeat$$
@@ -419,8 +401,8 @@ BEGIN
     IF v_home IS NULL OR NOT fn_has_permission(p_actor_id, v_home, 'SENSOR_VIEW') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Không có quyền xem dữ liệu cảm biến';
     END IF;
-    SELECT Record_ID, `Value`, Data_quality FROM Sensor_Record
-    WHERE Sensor_ID = p_sensor_id ORDER BY Record_ID DESC LIMIT p_limit;
+    SELECT Record_ID, Sensor_Value, Data_Quality, Time_Stamp FROM Sensor_Record
+    WHERE Sensor_ID = p_sensor_id ORDER BY Time_Stamp DESC, Record_ID DESC LIMIT p_limit;
 END$$
  
 -- ===== Cửa mật mã (6.6, 6.7) =====
@@ -845,5 +827,7 @@ BEGIN
 END$$
 
 DELIMITER ;
+
+
 
 

@@ -9,85 +9,65 @@ const validate = require('../middlewares/validate');
 const { pool, callProc } = require('../db');
 const { publishCommand } = require('../services/mqttService');
 
-// ==========================================
-// 1. DANH SÁCH 8 FEED CỐ ĐỊNH TRÊN ADAFRUIT IO
-// ==========================================
-const ALLOWED_FEEDS = [
-  'device-fan',
-  'device-light',
-  'door-status',
-  'smart-door',
-  'hardware-log',
-  'sensor-humidity',
-  'sensor-light',
-  'sensor-temperature',
-];
-
-// Hàm ánh xạ chặt chẽ về đúng 1 trong 8 feed hợp lệ
-const resolveValidFeedKey = (feedKey, typeCode, deviceName) => {
-  // 1. Nếu client truyền feedKey và nằm trong danh sách 8 feed thì ưu tiên
-  if (feedKey && ALLOWED_FEEDS.includes(feedKey.trim())) {
-    return feedKey.trim();
-  }
-
-  const type = String(typeCode || '').toUpperCase();
-  const name = String(deviceName || '').toUpperCase();
-
-  // 2. Nhận diện theo Đèn
-  if (type.includes('LIGHT') || type.includes('LED') || name.includes('ĐÈN')) {
-    return 'device-light';
-  }
-
-  // 3. Nhận diện theo Quạt
-  if (type.includes('FAN') || name.includes('QUẠT')) {
-    return 'device-fan';
-  }
-
-  // 4. Nhận diện theo Cửa
-  if (type.includes('DOOR') || name.includes('CỬA')) {
-    return 'smart-door';
-  }
-
-  // 5. Nhận diện theo loại cảm biến
-  if (type.includes('HUM') || name.includes('ẨM')) {
-    return 'sensor-humidity';
-  }
-  if (type.includes('TEMP') || name.includes('NHIỆT')) {
-    return 'sensor-temperature';
-  }
-  if (type.includes('PIR') || type.includes('LIGHT_SENSOR') || name.includes('SÁNG')) {
-    return 'sensor-light';
-  }
-
-  // Fallback an toàn nhất: đưa về hardware-log thay vì sinh feed lạ
-  return 'hardware-log';
-};
+const { resolveValidFeedKey, isFanDevice } = require('../utils/feeds');
 
 // ==========================================
-// 2. ZOD SCHEMAS
+// 1. ZOD SCHEMAS
 // ==========================================
+// Form trên web gửi mọi giá trị dạng chuỗi: "" -> null, "3" -> 3
+const optionalIntId = z.preprocess(
+  (v) => {
+    if (v === '') return null;
+    if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number(v);
+    return v;
+  },
+  z.number().int().positive().nullable().optional()
+);
+// "ONLINE" / "Online" -> "online"
+const connectionStateSchema = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+  z.enum(['online', 'offline'], { error: 'connectionState phải là online hoặc offline' })
+);
+
+const deviceIdParams = z.object({
+  homeId: z.string().regex(/^\d+$/, 'homeId phải là số nguyên'),
+  deviceId: z.string().regex(/^\d+$/, 'deviceId phải là số nguyên'),
+});
+
 const createDeviceSchema = z.object({
   body: z.object({
     deviceName: z.string().trim().min(1, 'Tên thiết bị không được để trống'),
-    typeCode: z.string().trim().min(1, 'Mã loại thiết bị không được để trống'),
+    typeCode: z.string().trim().min(1, 'Mã loại thiết bị không được để trống').transform((v) => v.toUpperCase()),
     hardwareId: z.string().trim().optional().nullable(),
     serialNo: z.string().trim().optional().nullable(),
-    controllerId: z.number().int().optional().nullable(),
-    connectionState: z.enum(['online', 'offline']).default('online'),
+    controllerId: optionalIntId,
+    connectionState: connectionStateSchema.default('online'),
     availableWorkingState: z.string().default('off'),
     feedKey: z.string().trim().optional().nullable(),
   }),
 });
 
 const updateDeviceSchema = z.object({
+  params: deviceIdParams,
   body: z.object({
     deviceName: z.string().trim().min(1).optional(),
-    connectionState: z.enum(['online', 'offline']).optional(),
-    availableWorkingState: z.string().optional(),
-    controllerId: z.number().int().nullable().optional(),
+    connectionState: connectionStateSchema.optional(),
+    availableWorkingState: z.string().trim().min(1).optional(),
+    controllerId: optionalIntId,
     feedKey: z.string().trim().nullable().optional(),
   }),
 });
+
+const deviceParamSchema = z.object({ params: deviceIdParams });
+
+// Device_Command.Source_Type là ENUM('USER','VOICE_COMMAND','SCHEDULE','SYSTEM'); Frontend có thể gửi 'APP', 'web'...
+const normalizeSourceType = (value) => {
+  const v = String(value || '').toUpperCase();
+  if (v === 'VOICE' || v === 'VOICE_COMMAND') return 'VOICE_COMMAND';
+  if (v === 'SCHEDULE' || v === 'AUTO') return 'SCHEDULE';
+  if (v === 'SYSTEM') return 'SYSTEM';
+  return 'USER';
+};
 
 const extractOutValue = (outResult, paramName) => {
   if (!outResult) return undefined;
@@ -228,8 +208,8 @@ router.post(
 router.patch(
   '/:deviceId',
   auth,
-  checkPermission('DEVICE_MANAGE'),
   validate(updateDeviceSchema),
+  checkPermission('DEVICE_MANAGE'),
   asyncHandler(async (req, res) => {
     const homeId = parseInt(req.params.homeId, 10);
     const deviceId = parseInt(req.params.deviceId, 10);
@@ -243,7 +223,9 @@ router.patch(
     if (availableWorkingState !== undefined) { fields.push('Available_working_State = ?'); params.push(availableWorkingState); }
     if (controllerId !== undefined) { fields.push('Controller_ID = ?'); params.push(controllerId); }
     if (feedKey !== undefined) {
-      const sanitizedFeed = resolveValidFeedKey(feedKey, null, deviceName);
+      // Dựa vào loại/tên hiện tại của thiết bị khi feedKey gửi lên không thuộc 8 feed chuẩn
+      const [cur] = await pool.query('SELECT Type_Code, Device_Name FROM Device WHERE Device_ID = ? AND Home_ID = ?', [deviceId, homeId]);
+      const sanitizedFeed = resolveValidFeedKey(feedKey, cur[0]?.Type_Code, deviceName ?? cur[0]?.Device_Name);
       fields.push('Feed_Key = ?');
       params.push(sanitizedFeed);
     }
@@ -273,6 +255,7 @@ router.patch(
 router.delete(
   '/:deviceId',
   auth,
+  validate(deviceParamSchema),
   checkPermission('DEVICE_MANAGE'),
   asyncHandler(async (req, res) => {
     const homeId = parseInt(req.params.homeId, 10);
@@ -287,6 +270,8 @@ router.delete(
       return res.status(404).json({ success: false, message: 'Không tìm thấy thiết bị để xóa' });
     }
 
+    await pool.query('CALL sp_log_activity(?, ?, ?, ?, ?, ?)', [req.user.User_ID, homeId, 'device', 'delete_device', 'web', 'success']);
+
     res.status(200).json({ success: true, message: 'Đã xóa thiết bị thành công' });
   })
 );
@@ -298,6 +283,7 @@ router.delete(
 router.post(
   '/:deviceId/commands',
   auth,
+  validate(deviceParamSchema),
   checkPermission('DEVICE_CONTROL'),
   asyncHandler(async (req, res) => {
     const userId = req.user.User_ID;
@@ -314,7 +300,7 @@ router.post(
           ? innerPayload.speed 
           : (typeof body.value === 'number' ? body.value : undefined));
     let value = body.value;
-    let sourceType = body.sourceType || 'USER';
+    const sourceType = normalizeSourceType(body.sourceType);
 
     if (!action) {
       if (state !== undefined) {
@@ -342,7 +328,7 @@ router.post(
 
     // 2. Đảm bảo feedKey thuộc đúng 8 feed chuẩn
     const feedKey = resolveValidFeedKey(device.Feed_Key, device.Type_Code, device.Device_Name);
-    const isFan = feedKey === 'device-fan' || String(device.Type_Code || '').toUpperCase().includes('FAN') || String(device.Device_Name || '').toUpperCase().includes('QUẠT');
+    const isFan = isFanDevice(device, feedKey);
 
     // 3. Chuẩn hóa payload
     let newWorkingState = null;
@@ -415,6 +401,7 @@ router.post(
           const io = req.app.get('io');
           if (io) {
             io.to(`home_${homeId}`).emit('device_state_updated', {
+              homeId,
               deviceId,
               state: newWorkingState,
             });
@@ -428,3 +415,4 @@ router.post(
 );
 
 module.exports = router;
+

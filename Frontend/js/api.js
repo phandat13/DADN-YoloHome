@@ -133,7 +133,10 @@ export const api = {
     list: (homeId) => request('GET', `${H(homeId)}/doors`),
     create: (homeId, doorName) => request('POST', `${H(homeId)}/doors`, { body: { doorName } }),
     issuePin: (homeId, doorName, pin) => request('POST', `${DOOR(homeId, doorName)}/pins`, { body: { pin } }),
-    changePin: (homeId, doorName, oldPin, newPin) => request('PUT', `${DOOR(homeId, doorName)}/change-pin`, { body: { oldPin, newPin } }),
+    credentials: (homeId, doorName) => request('GET', `${DOOR(homeId, doorName)}/credentials`),
+    // Bàn phím đã tự kiểm tra 2 lần nhập mã mới; BE tìm mã PIN khớp với mã hiện tại trên cửa này
+    changePin: (homeId, doorName, currentPin, newPin) => request('PUT', `${DOOR(homeId, doorName)}/change-pin`,
+      { body: { currentPin, newPin, confirmPin: newPin } }),
     revoke: (homeId, doorName, credentialId) => request('DELETE', `${DOOR(homeId, doorName)}/credentials/${enc(credentialId)}`),
     unlock: (homeId, doorName, state = 'unlocked') => request('POST', `${DOOR(homeId, doorName)}/unlock`, { body: { state } }),
     attempts: (homeId, doorName) => request('GET', `${DOOR(homeId, doorName)}/attempts`),
@@ -143,8 +146,9 @@ export const api = {
   ai: {
     listFaces: (homeId) => request('GET', `${H(homeId)}/ai/face-profiles`),
     addFace: (homeId, body) => request('POST', `${H(homeId)}/ai/face-profiles`, { body }),
-    recognize: (homeId, doorName, inputFaceVector, threshold) => request('POST',
-      `${H(homeId)}/ai/doors/${enc(doorName)}/face-recognition`, { body: { inputFaceVector, threshold }, auth: false }),
+    // Gửi kèm token: BE cho phép camera (x-iot-key) hoặc người dùng có quyền DOOR_UNLOCK. Ngưỡng do BE quyết định.
+    recognize: (homeId, doorName, inputFaceVector) => request('POST',
+      `${H(homeId)}/ai/doors/${enc(doorName)}/face-recognition`, { body: { inputFaceVector } }),
     voice: (homeId, commandDetail) => request('POST', `${H(homeId)}/ai/voice-commands`, { body: { commandDetail } }),
   },
   // 3.7 IoT telemetry
@@ -153,7 +157,7 @@ export const api = {
     addSensor: (homeId, body) => request('POST', `${H(homeId)}/iot/sensors`, { body }),
     pushTelemetry: (homeId, sensorId, value, dataQuality = 'GOOD') => request('POST',
       `${H(homeId)}/iot/sensors/${enc(sensorId)}/telemetry`, { body: { value, dataQuality } }),
-    records: (homeId, sensorId) => request('GET', `${H(homeId)}/iot/sensors/${enc(sensorId)}/records`),
+    records: (homeId, sensorId, query) => request('GET', `${H(homeId)}/iot/sensors/${enc(sensorId)}/records`, { query }),
   },
   // 3.8 Logs & notifications
   logs: {
@@ -165,3 +169,4 @@ export const api = {
     markAllRead: () => request('PATCH', '/notifications/read-all'), // Gọi thẳng route cập nhật hàng loạt
   },
 };
+

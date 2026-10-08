@@ -78,6 +78,7 @@ CREATE TABLE Notification (
     Content TEXT,
     `Level` VARCHAR(30),
     Unread_Read ENUM('Unread','Read') NOT NULL DEFAULT 'Unread',
+    Created_At DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,   -- thời điểm tạo (trigger chống spam + hiển thị trên web)
     User_ID INT NOT NULL,
     CONSTRAINT fk_noti_user FOREIGN KEY (User_ID)
         REFERENCES `User`(User_ID) ON DELETE CASCADE ON UPDATE CASCADE
@@ -98,14 +99,17 @@ CREATE TABLE Activity_Log (
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- Smart_Door_Name là khóa mà Access_Credential / Access_Attempt / Face_Recognition_Event tham chiếu (FK)
+-- nên phải UNIQUE trên toàn hệ thống: tránh lỗi "Result consisted of more than one row" trong các procedure
+-- khi 2 nhà đặt trùng tên cửa, và để FK hợp lệ trên MySQL 8.4+ (không cho FK trỏ vào cột không UNIQUE).
 CREATE TABLE Smart_Door (
 	Smart_Door_ID INT AUTO_INCREMENT PRIMARY KEY,
-    Smart_Door_Name VARCHAR(100),
+    Smart_Door_Name VARCHAR(100) NOT NULL,
     Working_State VARCHAR(30) NOT NULL DEFAULT 'enabled',
     Lock_Unlock_State ENUM('Locked','Unlocked') NOT NULL DEFAULT 'Locked',
     Home_ID INT NOT NULL,
+    UNIQUE KEY `uq_smart_door_name` (`Smart_Door_Name`),
     UNIQUE KEY `idx_home_door_unique` (`Home_ID`, `Smart_Door_Name`),
-	INDEX `idx_door_name` (`Smart_Door_Name`),
     CONSTRAINT fk_door_home FOREIGN KEY (Home_ID)
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -286,3 +290,4 @@ CREATE INDEX idx_hm_home ON Home_Member(Home_ID);
 CREATE INDEX idx_notification_unread ON Notification(User_ID, Unread_Read);
 CREATE INDEX idx_device_command_history ON Device_Command(Device_ID, Excute_Time);
 CREATE INDEX idx_access_credential ON Access_Credential(Smart_Door_Name, Credential_State);
+

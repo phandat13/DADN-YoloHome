@@ -58,3 +58,5 @@ export function startRouter() {
   ['devices', 'sensors', 'notifications', 'socket', 'homes'].forEach((e) => on(e, () => { if (current !== 'login') paintSidebar(); }));
   go();
 }
+
+

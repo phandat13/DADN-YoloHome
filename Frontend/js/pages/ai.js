@@ -62,11 +62,11 @@ export const aiPage = {
         ${panel({ title: 'Nhận diện tại cửa', icon: 'how_to_reg', body: `
           <div class="grid grid-cols-2 gap-3">
             ${field('Cửa', '<select id="face-door" class="w-full rounded-lg border-slate-200 text-sm"></select>')}
-            ${field('Ngưỡng (threshold)', `<input id="face-threshold" type="number" step="0.1" min="0" max="100" value="${FACE.DEFAULT_THRESHOLD}" class="${inputCls} font-mono">`)}
+            ${field('Ngưỡng tin cậy', `<input id="face-threshold" type="text" readonly value="${FACE.DEFAULT_THRESHOLD}% (cố định ở Backend)" class="${inputCls} font-mono bg-slate-50 text-slate-500">`)}
           </div>
           <div class="mt-4">${button('Nhận diện & mở cửa', { act: 'recognize', icon: 'door_open' })}</div>
           <div id="face-result" class="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-100 text-sm text-slate-400">Chưa chạy.</div>
-          <p class="text-[11px] text-slate-400 mt-3">API công khai dành cho camera trước cửa. Backend tính khoảng cách Euclid, &lt; ${FACE.MATCH_DISTANCE} thì tự mở cửa.</p>` })}
+          <p class="text-[11px] text-slate-400 mt-3">Camera trước cửa gọi API bằng x-iot-key; trên web cần quyền DOOR_UNLOCK. Backend tính khoảng cách Euclid, ≤ ${FACE.MATCH_DISTANCE} thì tự mở cửa.</p>` })}
 
         ${panel({ title: 'Đăng ký hồ sơ khuôn mặt', icon: 'person_add', body: `
           <div class="grid grid-cols-2 gap-3">
@@ -234,22 +234,21 @@ export const aiPage = {
         }
         case 'recognize': {
           const doorName = $('#face-door').value;
-          const threshold = parseFloat($('#face-threshold').value);
           if (!vector) return toast('Chưa có vector khuôn mặt', 'amber');
           if (!doorName) return toast('Nhà chưa có cửa — tạo cửa ở trang Cửa thông minh', 'amber');
           await busy(b, async () => {
             faceMsg('Đang so khớp…', 'text-sky-600');
             try {
-              const res = await api.ai.recognize(homeId, doorName, vector, Number.isFinite(threshold) ? threshold : FACE.DEFAULT_THRESHOLD);
+              const res = await api.ai.recognize(homeId, doorName, vector);
               if (!alive) return;
               const matched = pickAny(res, 'matched', 'isMatch', 'recognized', 'granted', 'unlocked', 'success');
               const dist = Number(pickAny(res, 'distance', 'minDistance', 'euclideanDistance'));
-              const who = label(pickAny(res, 'userName', 'displayName', 'name', 'matchedUser', 'userId', 'matchedUserId'));
+              const who = label(pickAny(res, 'label', 'userName', 'displayName', 'name', 'matchedUser', 'userId', 'matchedUserId'));
               const message = label(pickAny(res, 'message', 'result'));
               const ok = matched !== false && matched !== 'false';
               const info = [who && `Người: ${esc(memberName(who) ?? who)}`, Number.isFinite(dist) && `Khoảng cách: ${dist.toFixed(4)}`, message && esc(message)].filter(Boolean).join(' · ');
               if (ok) {
-                markDoorOpened('FaceAI', doorName);
+                markDoorOpened('FaceAI', doorName, res);
                 faceMsg(`KHỚP — đã mở "${esc(doorName)}"${info ? `<div class="text-xs font-normal text-slate-500 mt-1">${info}</div>` : ''}${rawJson(res)}`, 'text-emerald-600');
               } else {
                 faceMsg(`KHÔNG KHỚP${info ? `<div class="text-xs font-normal text-slate-500 mt-1">${info}</div>` : ''}${rawJson(res)}`, 'text-rose-600');
@@ -270,7 +269,7 @@ export const aiPage = {
           await busy(b, async () => {
             try {
               const body = { userId, faceData: vector };
-              if (expired) body.expired = expired;
+              if (expired) body.validTo = expired;          // BE nhận validFrom / validTo (YYYY-MM-DD = hết ngày đó)
               await api.ai.addFace(homeId, body);
               toast('Đã lưu hồ sơ khuôn mặt', 'emerald');
               addLog('device', `Đăng ký hồ sơ khuôn mặt cho ${memberName(userId) ?? `user #${userId}`}`);
@@ -308,3 +307,5 @@ export const aiPage = {
     };
   },
 };
+
+

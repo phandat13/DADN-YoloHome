@@ -25,7 +25,8 @@ INSERT IGNORE INTO Device_Type (Type_Code, Type_Name, Type_Group, Supported, Man
 ('LIGHT', 'Đèn chiếu sáng / LED', 'actuator', 1, 'OhStem'),
 ('FAN', 'Quạt làm mát', 'actuator', 1, 'OhStem'),
 ('SENSOR', 'Cụm cảm biến', 'sensor', 1, 'OhStem'),
-('DOOR_LOCK', 'Khóa cửa thông minh', 'security', 1, 'YoloHome');
+('DOOR_LOCK', 'Khóa cửa thông minh', 'security', 1, 'YoloHome'),
+('BUZZER', 'Còi cảnh báo', 'actuator', 1, 'OhStem');
 
 -- 4. Phân quyền cho từng vai trò
 -- Owner: toàn quyền
@@ -76,3 +77,4 @@ SELECT r.Role_ID, p.Permission_ID
 FROM Role r 
 CROSS JOIN Permission p
 WHERE r.Role_Name = 'Owner';
+
