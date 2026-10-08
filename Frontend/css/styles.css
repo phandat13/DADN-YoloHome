@@ -1,0 +1,24 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #f8fafc;
+  color: #0f172a;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+body { overscroll-behavior: none; }
+::-webkit-scrollbar { display: none; }
+.font-mono-num {
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+/* Màn hình đăng nhập: ẩn khung sidebar/topbar */
+body.auth-mode #sidebar,
+body.auth-mode #topbar { display: none; }
+body.auth-mode #shell-main { padding-left: 0; }
+
+/* Khối thông báo rỗng không chiếm khoảng cách */
+[data-hide-empty]:empty { display: none; }
+
+/* Camera dạng gương cho dễ căn mặt */
+.mirror { transform: scaleX(-1); }
