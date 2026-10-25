@@ -1,0 +1,19 @@
+# Bí mật
+.env
+**/.env
+!**/.env.example
+
+# Node
+node_modules/
+
+# Python / Gateway
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDE / hệ điều hành
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
