@@ -13,11 +13,15 @@ export const monitoringPage = {
       <div id="page-header" class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2"></div>
       <div id="notice" data-hide-empty></div>
       <div id="metric-cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div>
-      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        <section id="trend-chart" class="lg:col-span-8 bg-white rounded-xl p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between"></section>
-        <section id="lcd-panel" class="lg:col-span-4 bg-white rounded-xl p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between"></section>
+      
+      <!-- BỐ CỤC MỚI: Tách thành 2 dòng riêng biệt để Biểu đồ (trend-chart) mở rộng hết chiều rộng -->
+      <div class="flex flex-col gap-6">
+        <section id="trend-chart" class="w-full bg-white rounded-xl p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between"></section>
+        <section id="lcd-panel" class="w-full bg-white rounded-xl p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between"></section>
       </div>
+      
       <div id="status-bar" class="bg-white rounded-xl px-6 py-3.5 border border-slate-200/80 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"></div>`;
+
     const $ = (s) => root.querySelector(s);
     renderPageHeader($('#page-header'));
 
@@ -30,22 +34,24 @@ export const monitoringPage = {
         el.innerHTML = infoBlock('Đang mất kết nối Socket.IO — số liệu được làm mới qua REST mỗi 30 giây.', 'amber');
       } else el.innerHTML = '';
     };
+
     const paintLive = () => {
       renderMetricCards($('#metric-cards'), state.sensor, state.sensors);
       renderLcdPanel($('#lcd-panel'), state.sensor, state.socketConnected, state.assistant[0]?.text);
       renderStatusBar($('#status-bar'), state);
       paintNotice();
     };
+
     const paintChart = () => renderTrendChart($('#trend-chart'), state.history);
 
     paintLive();
     paintChart();
+
     const offs = [
       ...['sensor', 'sensors', 'devices', 'alerts', 'socket', 'loading', 'settings', 'assistant'].map((e) => on(e, paintLive)),
       on('history', paintChart),
     ];
+
     return () => offs.forEach((off) => off());
   },
 };
-
-
