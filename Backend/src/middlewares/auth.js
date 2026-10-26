@@ -30,7 +30,7 @@ async function auth(req, res, next) {
     }
 
     const user = users[0];
-    if (user.Account_state.toLowerCase() !== 'active') {
+    if (String(user.Account_state || '').toLowerCase() !== 'active') {
       return res.status(403).json({
         success: false,
         message: 'Tài khoản hiện đang bị khóa'

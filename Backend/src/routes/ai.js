@@ -7,20 +7,22 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const auth = require('../middlewares/auth');
 const checkPermission = require('../middlewares/permission');
 const validate = require('../middlewares/validate');
-const { publishCommand } = require('../services/mqttService');
 const { doorUnlocked } = require('../services/doorAutoLock');
 const { iotKeyOrUser } = require('../middlewares/iotAuth');
 const { toMysqlDatetime, optionalDateSchema } = require('../utils/datetime');
-const { resolveValidFeedKey, isFanDevice } = require('../utils/feeds');
 const { requireDoorInHome } = require('../utils/doors');
+const { parseVoice, resolveDevice } = require('../utils/voice');
+const { sendDeviceCommand, HttpError } = require('../services/deviceControl');
+const { disableAutoOnManual } = require('../services/automation');
+const assistant = require('../services/assistant');
+
+// face-api.js (Frontend) sinh descriptor 128 chiều; vector khác độ dài sẽ không bao giờ so khớp được
+const FACE_DIMS = 128;
+const faceVector = z.array(z.number().finite()).length(FACE_DIMS, `Vector khuôn mặt phải có đúng ${FACE_DIMS} chiều`);
 
 // ==========================================
 // 0. HELPER FUNCTIONS & MIDDLEWARES
 // ==========================================
-
-
-// Lấy tên cửa trực tiếp từ Express route param (Express đã tự decodeURIComponent)
-const getDoorName = (req) => req.params.doorName;
 
 // Trích xuất an toàn biến OUT từ outResult (đã chuẩn hóa sau khi fix db.js)
 const extractOutValue = (outResult, paramName) => {
@@ -42,40 +44,6 @@ const calculateEuclideanDistance = (vec1, vec2) => {
   return Math.sqrt(sum);
 };
 
-// Bộ phân tích ý định giọng nói tiếng Việt (hỗ trợ bật, tắt và set tốc độ/độ sáng %)
-const parseVietnameseVoiceIntent = (rawText) => {
-  const normalized = (rawText || '').toLowerCase().trim();
-  let action = 'UNKNOWN';
-  let deviceName = '';
-  let payload = {};
-
-  const percentMatch = normalized.match(/(\d+)\s*%/);
-  const percentage = percentMatch ? parseInt(percentMatch[1], 10) : null;
-
-  if (normalized.startsWith('bật') || normalized.includes('mở')) {
-    action = percentage !== null ? 'SET_SPEED' : 'TURN_ON';
-    payload = percentage !== null ? { state: 'ON', speed: percentage } : { state: 'ON' };
-    deviceName = normalized
-      .replace(/^(bật|mở)\s+/i, '')
-      .replace(/^thiết bị\s+/i, '')
-      .replace(/\s+\d+\s*%/i, '')
-      .trim();
-  } else if (normalized.startsWith('tắt') || normalized.includes('đóng')) {
-    action = 'TURN_OFF';
-    payload = { state: 'OFF', speed: 0 };
-    deviceName = normalized
-      .replace(/^(tắt|đóng)\s+/i, '')
-      .replace(/^thiết bị\s+/i, '')
-      .trim();
-  }
-
-  if (deviceName) {
-    deviceName = deviceName.charAt(0).toUpperCase() + deviceName.slice(1);
-  }
-
-  return { action, deviceName, payload };
-};
-
 // ==========================================
 // 1. ZOD SCHEMAS
 // ==========================================
@@ -89,7 +57,7 @@ const registerFaceSchema = z.object({
       targetUserId: intLike.optional(),
       userId: intLike.optional(),
       faceName: z.string().trim().optional(),
-      faceData: z.array(z.number()).optional().nullable(),
+      faceData: faceVector.optional().nullable(),
       validFrom: dateSchema,
       validTo: dateSchema,
     })
@@ -109,16 +77,14 @@ const updateFaceValiditySchema = z.object({
 // Không tin cậy client: Bắt buộc gửi vector, bỏ hoàn toàn reliability/threshold
 const faceRecognitionSchema = z.object({
   body: z.object({
-    inputFaceVector: z.array(z.number()).min(128, 'Vector khuôn mặt phải có ít nhất 128 chiều'),
+    inputFaceVector: faceVector,
   }),
 });
 
 const voiceCommandSchema = z.object({
   body: z.object({
-    commandDetail: z.string().trim().min(1, 'Chi tiết lệnh không được để trống'),
-    deviceName: z.string().trim().optional().nullable(),
-    commandData: z.record(z.string(), z.any()).optional().nullable(),
-    language: z.string().trim().default('vi-VN'),
+    commandDetail: z.string().trim().min(1, 'Chi tiết lệnh không được để trống').max(255),
+    language: z.string().trim().max(20).default('vi-VN'),
   }),
 });
 
@@ -288,17 +254,21 @@ router.post(
   requireDoorInHome,
   validate(faceRecognitionSchema),
   asyncHandler(async (req, res) => {
-    const doorName = getDoorName(req);
     const homeId = parseInt(req.params.homeId, 10);
     const { inputFaceVector } = req.body;
 
-    // Ngưỡng bảo mật cố định trên server.
-    // Độ tin cậy được quy đổi sao cho khoảng cách = EUCLIDEAN_THRESHOLD ứng với đúng SERVER_THRESHOLD (75%).
-    // (Bản cũ tính (1 - d) * 100 nên chỉ khoảng cách <= 0.25 mới đạt 75% -> người đúng vẫn bị từ chối.)
-    const SERVER_THRESHOLD = 75.0;
-    const EUCLIDEAN_THRESHOLD = 0.55;
-    const toReliability = (d) =>
-      Number.isFinite(d) ? Math.min(100, Math.max(0, Math.round((100 - (d / EUCLIDEAN_THRESHOLD) * (100 - SERVER_THRESHOLD)) * 100) / 100)) : 0;
+    // Ngưỡng khoảng cách Euclid tối ưu cho webcam / camera điều kiện thực tế
+    const EUCLIDEAN_THRESHOLD = 0.45;
+    const SERVER_THRESHOLD = 75.0; // Yêu cầu từ Stored Procedure
+
+    // Quy đổi khoảng cách sang độ tin cậy (%):
+    // d <= 0.45 -> reliability >= 75%
+    // d = 0 -> reliability = 100%
+    const toReliability = (d) => {
+      if (!Number.isFinite(d)) return 0;
+      const score = 100 - (d / 0.60) * 100;
+      return Math.min(100, Math.max(0, Math.round(score * 100) / 100));
+    };
 
     // Chỉ lấy hồ sơ hợp lệ còn trong hạn truy cập
     const [profiles] = await pool.query(
@@ -318,34 +288,35 @@ router.post(
       if (!p.Face_Data) continue;
       try {
         const savedVec = typeof p.Face_Data === 'string' ? JSON.parse(p.Face_Data) : p.Face_Data;
+        if (!Array.isArray(savedVec) || savedVec.length !== FACE_DIMS) continue;
+
         const dist = calculateEuclideanDistance(inputFaceVector, savedVec);
         if (dist < minDistance) {
           minDistance = dist;
           bestMatch = p;
         }
       } catch {
-        // Bỏ qua lỗi parsing nếu dữ liệu lưu bị hỏng
+        // Bỏ qua lỗi parsing dữ liệu lưu
       }
     }
 
     let faceProfileId = null;
     let label = 'unknown';
-    let reliability = 0.0;
+    let reliability = toReliability(minDistance);
 
+    // Xác nhận danh tính nếu khoảng cách nhỏ hơn hoặc bằng ngưỡng 0.45
     if (bestMatch && minDistance <= EUCLIDEAN_THRESHOLD) {
       faceProfileId = bestMatch.Face_Profile_ID;
       label = bestMatch.Name;
-      reliability = toReliability(minDistance);
     } else {
       label = 'unknown';
-      reliability = toReliability(minDistance);
     }
     const distance = Number.isFinite(minDistance) ? Math.round(minDistance * 10000) / 10000 : null;
 
     const outResult = await callProc(
       'sp_record_face_recognition',
       [
-        doorName,
+        req.doorRef.id,
         faceProfileId ? Number(faceProfileId) : null,
         label,
         Number(reliability),
@@ -357,12 +328,13 @@ router.post(
     const decision = extractOutValue(outResult, 'p_decision');
 
     if (decision === 'allowed') {
-      // Gửi UNLOCK_DOOR lên feed 'smart-door' + hẹn giờ tự khoá (gửi LOCK_DOOR khi hết giờ)
-      const door = doorUnlocked({ io: req.app.get('io'), homeId, doorName, source: 'face', userId: bestMatch?.User_ID ?? null });
+      // Gửi "1" lên feed 'smart-door' + hẹn giờ tự khoá (gửi "0" khi hết giờ)
+      const door = await doorUnlocked({ io: req.app.get('io'), homeId, door: req.doorRef, source: 'face' });
+      assistant.say(req.app.get('io'), homeId, `Xin chao ${label}`).catch(() => {});
 
       return res.status(200).json({
         success: true,
-        message: door.mqttPublished
+        message: door.mqttPublished || door.simulated
           ? 'Khuôn mặt hợp lệ, đã gửi lệnh mở cửa'
           : 'Khuôn mặt hợp lệ nhưng chưa gửi được lệnh mở cửa tới Adafruit IO (MQTT chưa kết nối)',
         decision: 'allowed',
@@ -388,123 +360,103 @@ router.post(
 // 4. ENDPOINTS LỆNH GIỌNG NÓI (VOICE COMMAND)
 // ==========================================
 
+const REPLY = {
+  on: (d) => `${d.Device_Name} đã bật`,
+  off: (d) => `${d.Device_Name} đã tắt`,
+  speed: (d, p) => (p.speed > 0 ? `${d.Device_Name} chạy ${p.speed}%` : `${d.Device_Name} đã tắt`),
+  color: (d) => `Đã đổi màu ${d.Device_Name.toLowerCase()}`,
+};
+const INPUT = {
+  on: () => ({ action: 'TURN_ON' }),
+  off: () => ({ action: 'TURN_OFF' }),
+  speed: (p) => ({ action: 'SET_SPEED', speed: p.speed }),
+  color: (p) => ({ action: 'SET_COLOR', color: p.color }),
+};
+
 /**
  * @route   POST /api/homes/:homeId/ai/voice-commands
- * @desc    Xử lý câu lệnh giọng nói, phân tích Intent và điều khiển thiết bị
- * @access  Yêu cầu quyền VOICE_USE (hoặc chủ nhà Owner)
+ * @desc    Phân tích câu lệnh tiếng Việt -> điều khiển đèn / quạt / còi; trợ lý phản hồi lên feed 'assistant' (V13)
+ * @access  Yêu cầu quyền VOICE_USE (chủ nhà luôn có)
  */
 router.post(
   '/voice-commands',
   auth,
-  // Lưu ý: Nếu user là Owner, backend vẫn cho phép chạy tiếp,
-  // hoặc checkPermission có thể giữ nguyên nếu middleware đã hỗ trợ bypass cho Owner.
-  checkPermission('VOICE_USE'),
   validate(voiceCommandSchema),
+  checkPermission('VOICE_USE'),
   asyncHandler(async (req, res) => {
     const userId = req.user.User_ID;
     const homeId = parseInt(req.params.homeId, 10);
-    let { commandDetail, deviceName, commandData, language } = req.body;
+    const io = req.app.get('io');
+    const { commandDetail, language } = req.body;
 
-    let parsedAction = 'UNKNOWN';
-    if (!deviceName || !commandData) {
-      const parsed = parseVietnameseVoiceIntent(commandDetail);
-      if (!deviceName) deviceName = parsed.deviceName;
-      if (!commandData) commandData = parsed.payload;
-      parsedAction = parsed.action;
-    }
+    const parsed = parseVoice(commandDetail);
+    const [devices] = await pool.query(
+      `SELECT Device_ID, Device_Name, Feed_Key, Type_Code, Connection_State, Available_working_State, Color, Home_ID
+       FROM Device WHERE Home_ID = ? ORDER BY Device_ID`,
+      [homeId]
+    );
+    const device = parsed.intent in INPUT ? resolveDevice(devices, parsed) : null;
+    const commandData = device ? INPUT[parsed.intent](parsed) : {};
 
-    // Gọi Stored Procedure đã nâng cấp nhận diện thiết bị & quyền chủ nhà
-    const outResult = await callProc(
+    // Ghi lịch sử Voice_Command (thiết bị không xác định -> 'unsupported', trigger tự tạo thông báo)
+    const { outParams } = await callProc(
       'sp_process_voice_command',
-      [
-        userId,
-        homeId,
-        commandDetail,
-        deviceName || '',
-        JSON.stringify(commandData || {}),
-        language,
-      ],
+      [userId, homeId, commandDetail, device?.Device_Name ?? '', JSON.stringify(commandData), language],
       ['p_voice_id', 'p_state', 'p_target_device_id', 'p_feed_key']
     );
+    const voiceId = outParams.p_voice_id;
 
-    const voiceId = extractOutValue(outResult, 'p_voice_id');
-    const state = extractOutValue(outResult, 'p_state');
-    const targetDeviceId = extractOutValue(outResult, 'p_target_device_id');
-    const feedKey = extractOutValue(outResult, 'p_feed_key');
-
-    if (state === 'unsupported' || !targetDeviceId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Lệnh không được hỗ trợ hoặc thiết bị không tồn tại/không đủ quyền',
-        data: { voiceId, state, commandDetail, deviceName },
+    const reject = async (status, reply, message = reply) => {
+      await assistant.say(io, homeId, reply).catch(() => false);
+      return res.status(status).json({
+        success: false, message, reply,
+        data: { voiceId, state: 'unsupported', commandDetail, intent: parsed.intent },
       });
+    };
+
+    if (parsed.intent === 'door') {
+      return reject(400, 'Vì an toàn, hãy mở cửa bằng mã PIN hoặc FaceAI');
+    }
+    if (!device || outParams.p_state !== 'sent') {
+      return reject(400, 'Tôi không hiểu', parsed.kind
+        ? 'Tôi không hiểu: nhà chưa có thiết bị phù hợp hoặc câu lệnh thiếu "bật / tắt / %"'
+        : 'Tôi không hiểu: hãy nói rõ thiết bị (đèn, quạt, còi) và hành động (bật, tắt, 50%, màu đỏ...)');
     }
 
-    if (state === 'sent') {
-      // Xác định loại thiết bị để xử lý payload MQTT (chuẩn theo Lỗi 1 & 2)
-      const [devRows] = await pool.query(
-        'SELECT Device_ID, Device_Name, Type_Code, Feed_Key FROM Device WHERE Device_ID = ? LIMIT 1',
-        [targetDeviceId]
-      );
-
-      const targetDevice = devRows[0];
-      // Luôn đưa về 1 trong 8 feed chuẩn (bản cũ có thể sinh feed lạ 'device-<id>')
-      const actualFeedKey = resolveValidFeedKey(feedKey || targetDevice?.Feed_Key, targetDevice?.Type_Code, targetDevice?.Device_Name);
-      const isFan = isFanDevice(targetDevice, actualFeedKey);
-
-      // Chuẩn hóa MQTT Payload:
-      // - Nếu là QUẠT: giữ speed
-      // - Nếu là ĐÈN hoặc thiết bị khác: loại bỏ speed khi TURN_OFF hoặc TURN_ON thường
-      const mqttPayload = { ...commandData };
-      if (!isFan) {
-        delete mqttPayload.speed;
-      }
-      // Cùng định dạng với lệnh từ trang Điều khiển: { action, state, speed? }
-      if (!mqttPayload.action) {
-        const on = String(mqttPayload.state).toUpperCase() === 'ON';
-        mqttPayload.action = !on ? 'TURN_OFF' : isFan && mqttPayload.speed !== undefined ? 'SET_SPEED' : 'TURN_ON';
-      }
-
-      // Gửi tín hiệu điều khiển qua MQTT Adafruit IO
-      publishCommand(actualFeedKey, mqttPayload);
-
-      // Cập nhật trạng thái hoạt động của thiết bị trong DB
-      let newWorkingState = mqttPayload?.state === 'ON' ? 'on' : 'off';
-      if (isFan && mqttPayload?.speed !== undefined && mqttPayload.speed > 0) {
-        newWorkingState = String(mqttPayload.speed);
-      }
-
-      await pool.query(
-        'UPDATE Device SET Available_working_State = ? WHERE Device_ID = ?',
-        [newWorkingState, targetDeviceId]
-      );
-
-      // Ghi lịch sử lệnh + báo các tab đang mở cập nhật công tắc
-      await pool
-        .query(
-          `INSERT INTO Device_Command (Source_ID, Source_Type, Data_attached, Excute_Time, Excute_State, Device_ID)
-           VALUES (?, 'VOICE_COMMAND', ?, NOW(), 'SUCCESS', ?)`,
-          [userId, JSON.stringify(mqttPayload), targetDeviceId]
-        )
-        .catch((err) => console.error('[VOICE] Không ghi được Device_Command:', err.message));
-      const io = req.app.get('io');
-      if (io) io.to(`home_${homeId}`).emit('device_state_updated', { homeId, deviceId: targetDeviceId, state: newWorkingState });
+    let result;
+    try {
+      result = await sendDeviceCommand({ io, homeId, device, input: commandData, userId, sourceType: 'VOICE_COMMAND' });
+    } catch (err) {
+      if (err instanceof HttpError) return reject(err.status, err.message);
+      throw err;
     }
+    if (!result.ok) {
+      return reject(503, 'Không gửi được lệnh', 'Không gửi được lệnh tới Adafruit IO (MQTT chưa kết nối hoặc không phản hồi)');
+    }
+
+    const autoModeDisabled = await disableAutoOnManual(io, homeId);
+    const reply = REPLY[parsed.intent](device, parsed);
+    await assistant.say(io, homeId, reply).catch(() => false);
 
     res.status(200).json({
       success: true,
-      message: 'Thực thi lệnh giọng nói thành công',
+      message: reply,
+      reply,
       data: {
         voiceId,
-        state,
+        state: 'sent',
         commandDetail,
-        deviceName,
-        targetDeviceId,
+        intent: parsed.intent,
+        deviceName: device.Device_Name,
+        targetDeviceId: device.Device_ID,
         commandData,
+        workingState: result.workingState,
+        color: result.color,
+        simulated: result.simulated,
+        autoModeDisabled,
       },
     });
   })
 );
 
 module.exports = router;
-

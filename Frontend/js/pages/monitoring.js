@@ -32,7 +32,7 @@ export const monitoringPage = {
     };
     const paintLive = () => {
       renderMetricCards($('#metric-cards'), state.sensor, state.sensors);
-      renderLcdPanel($('#lcd-panel'), state.sensor, state.socketConnected);
+      renderLcdPanel($('#lcd-panel'), state.sensor, state.socketConnected, state.assistant[0]?.text);
       renderStatusBar($('#status-bar'), state);
       paintNotice();
     };
@@ -41,7 +41,7 @@ export const monitoringPage = {
     paintLive();
     paintChart();
     const offs = [
-      ...['sensor', 'sensors', 'devices', 'alerts', 'socket', 'loading'].map((e) => on(e, paintLive)),
+      ...['sensor', 'sensors', 'devices', 'alerts', 'socket', 'loading', 'settings', 'assistant'].map((e) => on(e, paintLive)),
       on('history', paintChart),
     ];
     return () => offs.forEach((off) => off());

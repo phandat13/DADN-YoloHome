@@ -1,10 +1,12 @@
-// Trạng thái dùng chung + phiên đăng nhập + kết nối Socket.IO + logic ngưỡng/tự động hoá.
+// Trạng thái dùng chung + phiên đăng nhập + kết nối Socket.IO.
+// Ngưỡng cảnh báo, chế độ tự động và việc tự bật/tắt thiết bị nằm ở Backend (services/automation.js);
+// trình duyệt chỉ hiển thị và gửi yêu cầu đổi cài đặt.
 import { api, getToken, setToken, setUnauthorizedHandler } from './api.js';
-import { CONFIG, THRESHOLDS, DEFAULT_THRESHOLDS, TIMING } from './config.js';
+import { CONFIG, THRESHOLDS, DEFAULT_THRESHOLDS } from './config.js';
 import { pick, label, asList, asObject, deepFind, toTs, clamp, normText, hhmm } from './utils/fields.js';
 import {
   normUser, normHome, normDevice, normSensor, normDoor, normRecord, normNotification,
-  sensorKind, parseMotion, parseVoiceCommand,
+  sensorKind, parseMotion,
 } from './models.js';
 import { toast } from './ui.js';
 
@@ -25,16 +27,12 @@ export function onChange(events, signature, fn) {
 // ---------------- localStorage ----------------
 const LS = {
   home: 'yolohome.homeId',
-  thresholds: 'yolohome.thresholds',
   logs: (h) => `yolohome.logs.${h}`,
-  mode: (h) => `yolohome.mode.${h}`,
-  dev: (h) => `yolohome.devstate.${h}`,
 };
 const lsGet = (k, fallback) => { try { const v = localStorage.getItem(k); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
 // ---------------- State ----------------
-export const AUTO = 'tự động';
 const emptySensor = () => ({ temperature: null, humidity: null, light: null, motion: null, quality: {}, at: {}, updatedAt: null });
 const HISTORY_SPAN_MS = 864e5;   // biểu đồ dùng dữ liệu 24 giờ gần nhất
 const HISTORY_MAX = 5000;        // số điểm tối đa giữ cho mỗi đại lượng
@@ -51,11 +49,12 @@ export const state = {
   doors: [],                    // [{ id, name, state, credentials }]
   sensor: emptySensor(),        // giá trị mới nhất theo loại
   history: emptyHistory(),      // chuỗi {ts, value} để vẽ biểu đồ
-  mode: 'auto',
-  buzzer: false,
+  mode: 'auto',                 // 'auto' | 'manual' — lưu ở Backend (Home_Setting.Auto_Mode)
+  buzzer: false,                // còi đang bật (theo thiết bị BUZZER của nhà)
+  assistant: [],                // câu phản hồi gần nhất của trợ lý (feed 'assistant' / V13)
   doorOpen: false,              // có cửa đang mở khoá (theo trạng thái Backend)
   doorLockAt: null,             // thời điểm Backend sẽ tự khoá cửa (ms)
-  alerts: [],                   // cảnh báo ngưỡng đang hoạt động
+  alerts: [],                   // cảnh báo ngưỡng đang hoạt động (Backend tính)
   logs: [],                     // nhật ký cục bộ (cảnh báo, tự động hoá, thao tác)
   unread: 0,
   socketConnected: false,
@@ -63,10 +62,8 @@ export const state = {
   errors: {},
 };
 
-let devCache = {};              // trạng thái lệnh gần nhất theo thiết bị (trình duyệt gửi)
 let socket = null;
 let doorTimer = null;
-const autoBackoff = {};
 
 const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 
@@ -145,7 +142,7 @@ export async function loadHomes() {
 function resetHomeState() {
   Object.assign(state, {
     sensors: [], devices: [], doors: [], sensor: emptySensor(), history: emptyHistory(),
-    alerts: [], buzzer: false, doorOpen: false, doorLockAt: null, loading: false, errors: { homes: state.errors.homes },
+    alerts: [], buzzer: false, assistant: [], doorOpen: false, doorLockAt: null, loading: false, errors: { homes: state.errors.homes },
   });
 }
 
@@ -163,9 +160,7 @@ export async function selectHome(id) {
     return;
   }
   lsSet(LS.home, state.homeId);
-  state.mode = lsGet(LS.mode(state.homeId), 'auto');
   state.logs = lsGet(LS.logs(state.homeId), []);
-  devCache = lsGet(LS.dev(state.homeId), {});
   if (socket?.connected) socket.emit('join_home', state.homeId);
   state.loading = true;
   emit('home');
@@ -188,22 +183,18 @@ export async function refreshHomeData({ silent = false } = {}) {
   const hid = state.homeId;
   if (hid == null || !getToken()) return;
   if (!silent) { state.loading = true; emit('loading'); }
-  const [devs, sens, doors] = await Promise.allSettled([api.devices.list(hid), api.iot.sensors(hid), api.doors.list(hid)]);
+  const [devs, sens, doors, settings] = await Promise.allSettled([
+    api.devices.list(hid), api.iot.sensors(hid), api.doors.list(hid), api.settings.get(hid),
+  ]);
   if (!sameId(hid, state.homeId)) return;
   const take = (r, key, norm) => {
     if (r.status === 'fulfilled') { state.errors[key] = null; return asList(r.value, key).map(norm); }
     state.errors[key] = r.reason?.message || 'Lỗi tải dữ liệu';
     return null;
   };
-  const d = take(devs, 'devices', (x) => normDevice(x, devCache));
-  if (d) {
-    state.devices = d;
-    // Đồng bộ lại devCache cục bộ để không đè ngược trạng thái cũ lên thiết bị
-    d.forEach((item) => {
-      devCache[String(item.id)] = { on: item.on, speed: item.speed };
-    });
-    if (state.homeId != null) lsSet(LS.dev(state.homeId), devCache);
-  }
+  const d = take(devs, 'devices', normDevice);   // Backend là nguồn trạng thái duy nhất
+  if (d) { state.devices = d; syncBuzzer(); }
+  if (settings.status === 'fulfilled') applySettings(asObject(settings.value, 'settings'));
   const s = take(sens, 'sensors', normSensor);
   if (s) state.sensors = s;
   const dr = take(doors, 'doors', normDoor);
@@ -211,8 +202,7 @@ export async function refreshHomeData({ silent = false } = {}) {
   await loadReadings(hid, { full: !silent });
   if (!sameId(hid, state.homeId)) return;
   state.loading = false;
-  evaluate();
-  ['devices', 'sensors', 'doors', 'door', 'sensor', 'history', 'loading'].forEach(emit);
+  ['devices', 'sensors', 'doors', 'door', 'sensor', 'history', 'loading', 'alerts'].forEach(emit);
 }
 
 // Gộp điểm mới vào chuỗi cũ (bỏ trùng theo thời điểm), giữ 24 giờ gần nhất.
@@ -286,6 +276,44 @@ function connectSocket() {
   socket.on('device_state', onDeviceUpdate);
   socket.on('device_state_updated', onDeviceUpdate);   // tên sự kiện Backend thực sự phát (điều khiển + giọng nói)
   socket.on('door_state_updated', onDoorUpdate);       // mở khoá / khoá tay / tự khoá
+  socket.on('alerts_updated', (data) => { if (sameId(data?.homeId, state.homeId)) setAlerts(data.alerts); });
+  socket.on('motion_detected', (data) => {
+    if (!sameId(data?.homeId, state.homeId)) return;
+    const ts = toTs(data.timestamp) ?? Date.now();
+    toast(`🚶 ${data.message} (${hhmm(ts)})`, 'amber');
+    addLog('alert', `Phát hiện chuyển động lúc ${hhmm(ts)}`);
+    refreshNotifications();      // cập nhật số chưa đọc trên chuông
+    emit('motion_detected');     // để trang nào cần (dashboard...) tự lắng nghe
+  });
+  socket.on('settings_updated', (data) => { if (sameId(data?.homeId, state.homeId)) applySettings(data.settings); });
+  socket.on('assistant_message', (data) => {
+    if (!sameId(data?.homeId, state.homeId)) return;
+    state.assistant.unshift({ ts: toTs(data.timestamp) ?? Date.now(), text: data.text });
+    state.assistant.length = Math.min(state.assistant.length, 20);
+    emit('assistant');
+  });
+}
+
+// ---------------- Cài đặt / cảnh báo (từ Backend) ----------------
+function applySettings(s) {
+  if (!s || typeof s !== 'object') return;
+  const map = { TEMP_MAX: 'tempMax', HUMIDITY_MIN: 'humidityMin', HUMIDITY_MAX: 'humidityMax', LIGHT_MIN: 'lightMin' };
+  for (const [k, src] of Object.entries(map)) if (Number.isFinite(Number(s[src]))) THRESHOLDS[k] = Number(s[src]);
+  if (typeof s.autoMode === 'boolean') state.mode = s.autoMode ? 'auto' : 'manual';
+  if (Array.isArray(s.alerts)) setAlerts(s.alerts);
+  emit('settings'); emit('devices'); emit('sensor');
+}
+
+function setAlerts(list) {
+  const issues = (list ?? []).map((a) => ({ key: a.key, message: a.message, level: a.level }));
+  const before = new Set(state.alerts.map((a) => a.key));
+  issues.forEach((i) => { if (!before.has(i.key)) addLog('alert', `Cảnh báo: ${i.message} lúc ${hhmm(Date.now())}`); });
+  state.alerts = issues;
+  emit('alerts');
+}
+
+function syncBuzzer() {
+  state.buzzer = state.devices.some((d) => d.kind === 'buzzer' && d.on);
 }
 
 // Payload: { deviceId, state, speed, working }
@@ -299,6 +327,7 @@ function onDeviceUpdate(data) {
     return;
   }
 
+  if (data.color) target.color = String(data.color).toUpperCase();
   const rawState = String(data.state ?? data.working ?? data.Current_State ?? '').toLowerCase().trim();
   const rawSpeed = data.speed !== undefined ? Number(data.speed) : undefined;
 
@@ -317,8 +346,8 @@ function onDeviceUpdate(data) {
     target.working = target.on ? 'on' : 'off';
   }
 
-  rememberDevice(target);
-  emit('devices');
+  syncBuzzer();
+  emit('devices'); emit('alerts');
 }
 
 // Payload: { feed: "sensor-temperature", sensorId, value, quality, timestamp }
@@ -336,71 +365,61 @@ function onSensorUpdate(data) {
     series.push({ ts, value: Number(state.sensor[kind]) });
     if (series.length > HISTORY_MAX) series.splice(0, series.length - HISTORY_MAX);
   }
-  evaluate();
   emit('sensor'); emit('history');
 }
 
 // ---------------- Thiết bị ----------------
 const devLabel = (d) => (d.kind === 'fan' ? `${d.name} ${d.speed}%` : `${d.name} ${d.on ? 'BẬT' : 'TẮT'}`);
 
-function rememberDevice(d) {
-  devCache[String(d.id)] = { on: d.on, speed: d.speed };
-  if (state.homeId != null) lsSet(LS.dev(state.homeId), devCache);
+// Cập nhật thiết bị theo phản hồi của Backend (lệnh tay, giọng nói)
+export function applyDeviceState(deviceId, workingState, color) {
+  const dev = state.devices.find((d) => sameId(d.id, deviceId));
+  if (!dev) return null;
+  onDeviceUpdate({ homeId: state.homeId, deviceId, state: workingState, color });
+  return dev;
 }
 
 // Gửi lệnh qua POST /homes/:homeId/devices/:deviceId/commands
+// change: { on } | { speed } | { color }
 export async function controlDevice(dev, change, source = 'web') {
   if (state.homeId == null || !dev) return;
-  if (source !== AUTO && state.mode === 'auto') setMode('manual', 'thao tác thủ công');
-  const prev = { on: dev.on, speed: dev.speed };
-  let action;
-  let payload;
-  if (dev.kind === 'fan') {
+  const prev = { on: dev.on, speed: dev.speed, color: dev.color, working: dev.working };
+  let body;
+  if (change.color) {
+    body = { action: 'SET_COLOR', color: change.color };
+    dev.color = change.color.toUpperCase();
+  } else if (dev.kind === 'fan') {
     const speed = clamp(Math.round(change.speed ?? (change.on ? (dev.speed || 100) : 0)), 0, 100);
     Object.assign(dev, { speed, on: speed > 0, working: String(speed) });
-    [action, payload] = speed > 0 ? ['SET_SPEED', { state: 'ON', speed }] : ['TURN_OFF', { state: 'OFF', speed: 0 }];
+    body = { action: 'SET_SPEED', speed };
   } else {
     const onv = !!change.on;
     Object.assign(dev, { on: onv, speed: onv ? 100 : 0, working: onv ? 'on' : 'off' });
-    [action, payload] = onv ? ['TURN_ON', { state: 'ON' }] : ['TURN_OFF', { state: 'OFF' }];
+    body = { action: onv ? 'TURN_ON' : 'TURN_OFF' };
   }
+  syncBuzzer();
   emit('devices');
   try {
-    await api.devices.command(state.homeId, dev.id, action, payload);
-    rememberDevice(dev);
-    addLog('device', `${devLabel(dev)} (${source})`);
+    const res = await api.devices.command(state.homeId, dev.id, body);
+    const data = asObject(res, 'data');
+    if (data?.workingState != null) applyDeviceState(dev.id, data.workingState, data.color);
+    if (data?.autoModeDisabled) { state.mode = 'manual'; addLog('device', 'Chuyển sang chế độ thủ công (thao tác tay)'); emit('devices'); }
+    addLog('device', `${change.color ? `${dev.name} đổi màu ${dev.color}` : devLabel(dev)} (${source})`);
   } catch (e) {
     Object.assign(dev, prev);
+    syncBuzzer();
     emit('devices');
-    addLog('device', `Lỗi gửi lệnh ${action} tới ${dev.name}: ${e.message}`);
+    addLog('device', `Lỗi gửi lệnh ${body.action} tới ${dev.name}: ${e.message}`);
     throw e;
   }
 }
 
-// Sau khi BE xử lý lệnh giọng nói thành công: phản ánh thay đổi lên giao diện (không gửi lệnh lần 2).
-export function reflectVoiceCommand(text) {
-  const cmd = parseVoiceCommand(text);
-  if (!cmd) return null;
-  const t = normText(text);
-  const candidates = state.devices.filter((d) => d.kind === cmd.kind);
-  const dev = candidates.find((d) => t.includes(normText(d.name))) ?? candidates[0];
-  if (!dev) return null;
-  if (state.mode === 'auto') setMode('manual', 'lệnh giọng nói');
-  if (cmd.kind === 'fan') Object.assign(dev, { speed: cmd.speed, on: cmd.speed > 0, working: String(cmd.speed) });
-  else Object.assign(dev, { on: cmd.on, speed: cmd.on ? 100 : 0, working: cmd.on ? 'on' : 'off' });
-  rememberDevice(dev);
-  addLog('device', `${devLabel(dev)} (giọng nói)`);
-  emit('devices');
-  return dev;
-}
-
-export function setMode(mode, reason = '') {
-  if (state.mode === mode) return;
-  state.mode = mode;
-  if (state.homeId != null) lsSet(LS.mode(state.homeId), mode);
-  addLog('device', `Chuyển sang chế độ ${mode === 'auto' ? 'tự động' : 'thủ công'}${reason ? ` (${reason})` : ''}`);
-  emit('devices');
-  applyAuto();
+// Bật / tắt chế độ tự động (lưu ở Backend, áp dụng cho mọi thành viên)
+export async function setMode(mode) {
+  if (state.homeId == null || state.mode === mode) return;
+  const res = await api.settings.setMode(state.homeId, mode === 'auto');
+  applySettings(asObject(res, 'data'));
+  addLog('device', `Chuyển sang chế độ ${mode === 'auto' ? 'tự động' : 'thủ công'}`);
 }
 
 // ---------------- Cửa ----------------
@@ -455,54 +474,13 @@ function onDoorUpdate(data) {
   setDoorState(data.doorName, lockState, toTs(data.autoLockAt));
 }
 
-// ---------------- Ngưỡng + tự động hoá ----------------
-const fresh = (k) => state.sensor[k] != null && state.sensor.at[k] != null && Date.now() - state.sensor.at[k] < TIMING.FRESH_DATA_MS;
-
-function autoSend(dev, change) {
-  if ((autoBackoff[dev.id] ?? 0) > Date.now()) return;
-  controlDevice(dev, change, AUTO).catch(() => { autoBackoff[dev.id] = Date.now() + 60e3; });
-}
-
-// Chế độ tự động: đèn theo PIR/ánh sáng, quạt theo nhiệt độ. Lệnh được gửi thật xuống BE.
-function applyAuto() {
-  if (state.mode !== 'auto' || state.homeId == null) return;
-  const s = state.sensor;
-  const light = state.devices.find((d) => d.kind === 'light');
-  if (light && (fresh('light') || fresh('motion'))) {
-    const want = (fresh('motion') && !!s.motion) || (fresh('light') && s.light < THRESHOLDS.LIGHT_MIN);
-    if (light.on !== want) autoSend(light, { on: want });
-  }
-  const fan = state.devices.find((d) => d.kind === 'fan');
-  if (fan && fresh('temperature')) {
-    const want = s.temperature > THRESHOLDS.TEMP_MAX ? 100 : 0;
-    if (fan.speed !== want) autoSend(fan, { speed: want });
-  }
-}
-
-export function evaluate() {
-  const s = state.sensor;
-  const t = THRESHOLDS;
-  const issues = [];
-  if (s.temperature != null && s.temperature > t.TEMP_MAX) {
-    issues.push({ key: 'temp', message: `Nhiệt độ ${s.temperature}°C vượt ngưỡng ${t.TEMP_MAX}°C` });
-  }
-  if (s.humidity != null && (s.humidity < t.HUMIDITY_MIN || s.humidity > t.HUMIDITY_MAX)) {
-    issues.push({ key: 'hum', message: `Độ ẩm ${s.humidity}% ngoài khoảng ${t.HUMIDITY_MIN}–${t.HUMIDITY_MAX}%` });
-  }
-  const before = new Set(state.alerts.map((a) => a.key));
-  issues.forEach((i) => { if (!before.has(i.key)) addLog('alert', `Cảnh báo: ${i.message} lúc ${hhmm(Date.now())}`); });
-  state.alerts = issues;
-  state.buzzer = issues.some((i) => i.key === 'temp');
-  applyAuto();
-  emit('alerts');
-}
-
-export function applyThresholds(values) {
-  Object.assign(THRESHOLDS, values);
-  lsSet(LS.thresholds, { ...THRESHOLDS });
+// ---------------- Ngưỡng (lưu ở Backend) ----------------
+export async function applyThresholds(values) {
+  const res = await api.settings.update(state.homeId, {
+    tempMax: values.TEMP_MAX, humidityMin: values.HUMIDITY_MIN, humidityMax: values.HUMIDITY_MAX, lightMin: values.LIGHT_MIN,
+  });
+  applySettings(asObject(res, 'data'));
   addLog('device', 'Cập nhật ngưỡng cảnh báo');
-  evaluate();
-  emit('sensor');
 }
 export const resetThresholds = () => applyThresholds({ ...DEFAULT_THRESHOLDS });
 
@@ -518,7 +496,6 @@ export async function refreshNotifications() {
 
 // ---------------- Khởi tạo ----------------
 export async function initStore() {
-  Object.assign(THRESHOLDS, lsGet(LS.thresholds, {}));
   await bootstrap();
 }
 

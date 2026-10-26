@@ -1,3 +1,4 @@
+SET NAMES utf8mb4;
 USE smart_home;
 
 -- Quy ước giá trị trạng thái (chữ thường):
@@ -56,6 +57,8 @@ BEGIN
     END IF;
     INSERT INTO Home_Member (`Status`, User_ID, Home_ID, Role_ID)
     VALUES ('active', NEW.Owner_ID, NEW.Home_ID, v_owner_role);
+    -- Ngưỡng cảnh báo / chế độ tự động mặc định cho nhà mới
+    INSERT IGNORE INTO Home_Setting (Home_ID) VALUES (NEW.Home_ID);
 END$$
 
 -- Mỗi nhà chỉ có một chủ nhà duy nhất, không được chuyển quyền
@@ -155,7 +158,7 @@ DROP TRIGGER IF EXISTS trg_access_credential_bi$$
 CREATE TRIGGER trg_access_credential_bi BEFORE INSERT ON Access_Credential FOR EACH ROW
 BEGIN
     DECLARE v_home INT;
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = NEW.Smart_Door_Name;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = NEW.Smart_Door_ID;
     IF NOT fn_is_home_member(NEW.User_ID, v_home) THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Người dùng không phải thành viên còn hiệu lực của nhà';
     END IF;
@@ -186,23 +189,24 @@ BEGIN
     DECLARE v_owner INT DEFAULT NULL;
     DECLARE v_fails INT DEFAULT 0;
     DECLARE v_title VARCHAR(150);
+    DECLARE v_door_name VARCHAR(100);
  
-    SELECT h.Owner_ID INTO v_owner
+    SELECT h.Owner_ID, sd.Smart_Door_Name INTO v_owner, v_door_name
     FROM Smart_Door sd JOIN Home h ON h.Home_ID = sd.Home_ID
-    WHERE sd.Smart_Door_Name = NEW.Smart_Door_Name;
+    WHERE sd.Smart_Door_ID = NEW.Smart_Door_ID;
  
     IF LOWER(NEW.Access_Result) = 'failed' THEN
-        SET v_fails = fn_count_failed_attempts(NEW.Smart_Door_Name, 10);
+        SET v_fails = fn_count_failed_attempts(NEW.Smart_Door_ID, 10);
         SET v_title = IF(NEW.Failure_Reason = 'unknown_face',
                          'Có người không xác định tiếp cận cửa', 'Truy cập cửa thất bại');
         CALL sp_notify(v_owner, v_title, 'door_alert',
-            CONCAT('Cửa ', NEW.Smart_Door_Name, ' - phương thức ', COALESCE(NEW.Verify_Method, 'n/a'),
+            CONCAT('Cửa ', v_door_name, ' - phương thức ', COALESCE(NEW.Verify_Method, 'n/a'),
                    ' - lý do: ', COALESCE(NEW.Failure_Reason, 'không rõ'),
                    '. Số lần thất bại trong 10 phút: ', v_fails, '.'),
             IF(v_fails >= 3, 'critical', 'warning'));
     ELSEIF LOWER(NEW.Access_Result) = 'success' THEN
         CALL sp_notify(v_owner, 'Có người truy cập cửa', 'door_access',
-            CONCAT('Cửa ', NEW.Smart_Door_Name, ' được mở bằng phương thức ',
+            CONCAT('Cửa ', v_door_name, ' được mở bằng phương thức ',
                    COALESCE(NEW.Verify_Method, 'n/a'), '.'),
             'info');
     END IF;

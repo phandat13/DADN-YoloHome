@@ -79,7 +79,7 @@ export const historyPage = {
         title: `Sự kiện trên trình duyệt (${rows.length})`, icon: 'devices',
         right: '<button type="button" data-act="clear" class="text-xs font-semibold text-rose-600 hover:text-rose-700">Xoá lịch sử cục bộ</button>',
         body: `
-          <p class="text-xs text-slate-400 mb-3">Cảnh báo ngưỡng, lệnh tự động/thủ công và thao tác cửa ghi nhận trên trình duyệt này (lưu trong localStorage theo từng nhà).</p>
+          <p class="text-xs text-slate-400 mb-3">Nhật ký nhanh của trình duyệt này (lưu localStorage theo từng nhà): cảnh báo, thao tác thiết bị và cửa. Cảnh báo / lệnh tự động do Backend thực hiện được lưu ở mục Thông báo và nhật ký hoạt động bên dưới.</p>
           <div class="flex flex-wrap items-center gap-3 mb-4">
             ${segmented(Object.entries(PERIODS).map(([k, v]) => [k, v[0]]), period, 'period')}
             ${segmented(TYPES, localType, 'type')}

@@ -1,3 +1,4 @@
+SET NAMES utf8mb4;
 USE smart_home;
 
 -- Quy ước giá trị trạng thái (chữ thường):
@@ -13,12 +14,12 @@ USE smart_home;
 
 DELIMITER $$
 
--- Băm PIN có "muối" theo cửa + người dùng (PIN không lưu dạng rõ)
+-- Băm PIN có "muối" theo cửa (Smart_Door_ID) + người dùng (PIN không lưu dạng rõ)
 DROP FUNCTION IF EXISTS fn_hash_pin$$
-CREATE FUNCTION fn_hash_pin(p_door VARCHAR(100), p_user_id INT, p_pin VARCHAR(100))
+CREATE FUNCTION fn_hash_pin(p_door_id INT, p_user_id INT, p_pin VARCHAR(100))
 RETURNS CHAR(64) DETERMINISTIC NO SQL
 BEGIN
-    RETURN SHA2(CONCAT(p_door, ':', p_user_id, ':', p_pin), 256);
+    RETURN SHA2(CONCAT('door#', p_door_id, ':', p_user_id, ':', p_pin), 256);
 END$$
 
 DROP FUNCTION IF EXISTS fn_is_valid_email$$
@@ -96,30 +97,30 @@ END$$
 
 -- Xác thực PIN: trả về User_ID sở hữu PIN hợp lệ, NULL nếu sai/hết hạn/bị thu hồi
 DROP FUNCTION IF EXISTS fn_verify_pin$$
-CREATE FUNCTION fn_verify_pin(p_door VARCHAR(100), p_pin VARCHAR(100))
+CREATE FUNCTION fn_verify_pin(p_door_id INT, p_pin VARCHAR(100))
 RETURNS INT READS SQL DATA
 BEGIN
     DECLARE v_user INT DEFAULT NULL;
     SELECT User_ID INTO v_user
     FROM Access_Credential
-    WHERE Smart_Door_Name = p_door
+    WHERE Smart_Door_ID = p_door_id
       AND LOWER(Credential_State) = 'active'
       AND (Valid_From IS NULL OR Valid_From <= NOW())
       AND (Valid_To   IS NULL OR Valid_To   >= NOW())
-      AND Credential_Value = fn_hash_pin(p_door, User_ID, p_pin)
+      AND Credential_Value = fn_hash_pin(p_door_id, User_ID, p_pin)
     LIMIT 1;
     RETURN v_user;
 END$$
 
 -- Số lần truy cập thất bại gần đây (không tính các lần bị khóa tạm)
 DROP FUNCTION IF EXISTS fn_count_failed_attempts$$
-CREATE FUNCTION fn_count_failed_attempts(p_door VARCHAR(100), p_minutes INT)
+CREATE FUNCTION fn_count_failed_attempts(p_door_id INT, p_minutes INT)
 RETURNS INT READS SQL DATA
 BEGIN
     DECLARE v_cnt INT DEFAULT 0;
     SELECT COUNT(*) INTO v_cnt
     FROM Access_Attempt
-    WHERE Smart_Door_Name = p_door
+    WHERE Smart_Door_ID = p_door_id
       AND LOWER(Access_Result) = 'failed'
       AND (Failure_Reason IS NULL OR Failure_Reason <> 'locked_out')
       AND `Time` >= NOW() - INTERVAL p_minutes MINUTE;

@@ -3,14 +3,18 @@ import { formatDate, formatTime } from '../services/syncService.js';
 
 const show = (v, digits) => (v == null ? '--' : digits == null ? v : Number(v).toFixed(digits));
 
-export function renderLcdPanel(el, s, live = false) {
+// Mô phỏng nội dung LCD 16x2 trên mạch: dòng 1 = số liệu cảm biến, dòng 2 = câu trợ lý gần nhất (nếu có) hoặc ngày giờ.
+// LCD thật do firmware Yolo:Bit điều khiển; câu trợ lý được gửi xuống mạch qua Gateway (!MSG:...#).
+const toLcd = (t) => String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').slice(0, 16);
+
+export function renderLcdPanel(el, s, live = false, assistantText = '') {
   const now = new Date();
   el.innerHTML = `
     <div class="space-y-4">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-2">
           <span class="material-symbols-outlined text-[20px] text-sky-600">developer_board</span>
-          <span class="font-bold text-slate-900 text-sm font-['Space_Grotesk']">Màn hình LCD 16x2</span>
+          <span class="font-bold text-slate-900 text-sm font-['Space_Grotesk']">Màn hình LCD 16x2 <span class="font-normal text-slate-400 text-xs">(mô phỏng)</span></span>
         </div>
         <span class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 text-slate-600">I2C: ${DEVICE.lcdAddress}</span>
       </div>
@@ -24,9 +28,10 @@ export function renderLcdPanel(el, s, live = false) {
           <div class="flex justify-between font-bold">
             <span>${show(s.temperature, 1)}C</span><span>${show(s.humidity, 0)}%</span><span>${show(s.light)}L</span>
           </div>
+          ${assistantText ? `<div class="text-[11px] text-teal-100 font-medium pt-1 truncate" title="Trợ lý">${toLcd(assistantText).replace(/[<>&"]/g, '')}</div>` : `
           <div class="flex justify-between text-[11px] text-teal-300/80 font-medium pt-1">
             <span>${formatDate(now)}</span><span id="lcd-clock">${formatTime(now)}</span><span class="text-teal-400">${live ? 'NTP OK' : 'NO LINK'}</span>
-          </div>
+          </div>`}
         </div>
       </div>
 
@@ -34,7 +39,7 @@ export function renderLcdPanel(el, s, live = false) {
         <span class="material-symbols-outlined text-rose-500 text-[18px] mt-0.5">warning</span>
         <div class="text-xs">
           <span class="font-semibold text-rose-800">Cảnh báo tự động</span>
-          <p class="text-rose-700/90 mt-0.5">Cảnh báo &amp; bật quạt 100% (chế độ tự động) khi nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C</p>
+          <p class="text-rose-700/90 mt-0.5">Cảnh báo, bật quạt 100% và còi (chế độ tự động) khi nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C</p>
         </div>
       </div>
     </div>

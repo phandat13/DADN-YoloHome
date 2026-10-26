@@ -1,8 +1,9 @@
 // AI & Nhận diện:
-//  - Giọng nói (UC 3.3): Web Speech API (vi-VN) → POST /ai/voice-commands { commandDetail } → BE phân tích NLP.
+//  - Giọng nói (UC 3.3): Web Speech API (vi-VN) → POST /ai/voice-commands { commandDetail } → BE phân tích,
+//    điều khiển thiết bị và trợ lý trả lời (feed 'assistant' / V13, sự kiện Socket.IO 'assistant_message').
 //  - FaceAI (UC 3.4): vector 128 chiều (face-api.js) → POST /ai/face-profiles và
-//    POST /ai/doors/:doorName/face-recognition (public) — BE tính khoảng cách Euclid, < 0.6 thì mở cửa.
-import { state, onChange, addLog, markDoorOpened, reflectVoiceCommand, refreshHomeData } from '../store.js';
+//    POST /ai/doors/:doorName/face-recognition (x-iot-key hoặc người dùng có DOOR_UNLOCK) — khoảng cách Euclid ≤ 0.55 thì mở cửa.
+import { state, on, onChange, addLog, markDoorOpened, applyDeviceState, refreshHomeData } from '../store.js';
 import { api } from '../api.js';
 import { FACE } from '../config.js';
 import { asList, esc, fmtDate, fullTime, label, pickAny, idValue } from '../utils/fields.js';
@@ -10,13 +11,13 @@ import { normFaceProfile, normMember } from '../models.js';
 import { startCamera, stopCamera, extractDescriptor, parseVector } from '../services/faceEngine.js';
 import { panel, pageTitle, badge, button, field, inputCls, emptyState, loadingBlock, errorBlock, toast, busy, fail } from '../ui.js';
 
-const QUICK = ['Bật đèn', 'Tắt đèn', 'Bật quạt 50%', 'Bật quạt phòng khách lên 80%', 'Tắt quạt'];
+const QUICK = ['Bật đèn', 'Tắt đèn', 'Đổi đèn màu đỏ', 'Bật quạt 50%', 'Quạt mức 3', 'Tắt quạt', 'Bật còi'];
 const rawJson = (res) => (res == null ? '' : `<details class="mt-2"><summary class="text-[11px] text-slate-400 cursor-pointer">Phản hồi Backend</summary>
   <pre class="mt-1 text-[11px] bg-slate-900 text-slate-100 rounded p-2 overflow-x-auto max-h-48">${esc(JSON.stringify(res, null, 2))}</pre></details>`);
 
 export const aiPage = {
   mount(root) {
-    let alive = true, vector = null, stream = null, recog = null;
+    let alive = true, vector = null, pastedVector = null, stream = null, recog = null;
     let profiles = null, profilesErr = null, members = null;
     const homeId = state.homeId;
 
@@ -36,6 +37,10 @@ export const aiPage = {
             ${QUICK.map((c) => `<button type="button" data-cmd="${c}" class="px-2.5 py-1 rounded-full bg-sky-50 text-sky-700 text-xs font-medium hover:bg-sky-100">${c}</button>`).join('')}
           </div>
           <div id="voice-result" class="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-100 text-sm text-slate-400">Chưa có lệnh nào.</div>
+          <div class="mt-4">
+            <div class="text-xs font-semibold text-slate-500 mb-1.5 flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">smart_toy</span>Trợ lý (cũng hiện trên LCD của mạch)</div>
+            <ul id="assistant-log" class="space-y-1 text-xs"></ul>
+          </div>
           <p class="text-[11px] text-slate-400 mt-3">Văn bản được gửi tới <span class="font-mono">POST /ai/voice-commands</span> (cần quyền VOICE_USE).</p>` })}
 
         ${panel({ title: 'Vector khuôn mặt', icon: 'face', body: `
@@ -65,6 +70,7 @@ export const aiPage = {
             ${field('Ngưỡng tin cậy', `<input id="face-threshold" type="text" readonly value="${FACE.DEFAULT_THRESHOLD}% (cố định ở Backend)" class="${inputCls} font-mono bg-slate-50 text-slate-500">`)}
           </div>
           <div class="mt-4">${button('Nhận diện & mở cửa', { act: 'recognize', icon: 'door_open' })}</div>
+          <p class="text-[11px] text-slate-500 mt-2">Bật camera ở khung "Vector khuôn mặt" — khi bấm, hệ thống chụp khuôn mặt <b>mới</b> rồi so với hồ sơ đã lưu.</p>
           <div id="face-result" class="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-100 text-sm text-slate-400">Chưa chạy.</div>
           <p class="text-[11px] text-slate-400 mt-3">Camera trước cửa gọi API bằng x-iot-key; trên web cần quyền DOOR_UNLOCK. Backend tính khoảng cách Euclid, ≤ ${FACE.MATCH_DISTANCE} thì tự mở cửa.</p>` })}
 
@@ -92,15 +98,16 @@ export const aiPage = {
       try {
         const res = await api.ai.voice(homeId, t);
         if (!alive) return;
-        const message = label(pickAny(res, 'message', 'reply', 'responseText')) || label(pickAny(res, 'result', 'detail')) || 'Backend đã xử lý lệnh';
+        const message = label(pickAny(res, 'reply', 'message')) || 'Backend đã xử lý lệnh';
         showVoice(t, message, 'text-emerald-600', res);
         toast(message, 'emerald');
-        const dev = reflectVoiceCommand(t);
-        if (!dev) addLog('device', `Giọng nói "${t}" → ${message}`);
-        setTimeout(() => refreshHomeData({ silent: true }), 800);
+        const data = res?.data ?? {};
+        if (data.targetDeviceId != null) applyDeviceState(data.targetDeviceId, data.workingState, data.color);
+        if (data.autoModeDisabled) setTimeout(() => refreshHomeData({ silent: true }), 300);
+        addLog('device', `Giọng nói "${t}" → ${message}`);
       } catch (e) {
         if (!alive) return;
-        const text403 = e.status === 403 ? 'Bạn không có quyền VOICE_USE' : e.message;
+        const text403 = e.status === 403 ? 'Bạn không có quyền VOICE_USE' : (e.body?.reply || e.message);
         showVoice(t, `KHÔNG THỰC HIỆN ĐƯỢC — ${text403}`, 'text-rose-600', e.body);
         addLog('device', `Giọng nói "${t}" → lỗi: ${text403}`);
       }
@@ -161,12 +168,15 @@ export const aiPage = {
           <thead><tr class="text-left text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-100">
             <th class="py-2 pr-4 font-semibold">ID</th><th class="py-2 pr-4 font-semibold">Người dùng</th><th class="py-2 pr-4 font-semibold">Vector</th>
             <th class="py-2 pr-4 font-semibold">Hết hạn</th><th class="py-2 font-semibold">Ngày tạo</th></tr></thead>
+            <th class="py-2 font-semibold text-right">Hành động</th>
           <tbody>${profiles.map((p) => `<tr class="border-b border-slate-50">
             <td class="py-2 pr-4 font-mono text-xs text-slate-500">${esc(p.id ?? '—')}</td>
             <td class="py-2 pr-4 font-semibold text-slate-800">${esc(p.name || memberName(p.userId) || (p.userId != null ? `User #${p.userId}` : '—'))}</td>
             <td class="py-2 pr-4 text-xs text-slate-500">${p.dims ? `${p.dims} chiều` : '—'}</td>
             <td class="py-2 pr-4 text-xs text-slate-600">${p.expired ? fmtDate(p.expired) : 'Không giới hạn'}</td>
-            <td class="py-2 font-mono text-xs text-slate-500">${p.ts ? fullTime(p.ts) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+            <td class="py-2 font-mono text-xs text-slate-500">${p.ts ? fullTime(p.ts) : '—'}</td>
+            <td class="py-2 text-right">${button('', { act: 'delete-face', val: p.id, tone: 'danger', icon: 'delete', size: 'sm', attrs: 'title="Xóa FaceID"' })}</td>
+            </tr>`).join('')}</tbody></table></div>`;
       }
       $('#profiles').innerHTML = panel({
         title: `Hồ sơ khuôn mặt đã đăng ký${profiles?.length ? ` (${profiles.length})` : ''}`, icon: 'badge',
@@ -229,17 +239,29 @@ export const aiPage = {
         case 'paste': {
           const v = parseVector($('#vec-input').value);
           if (!v) return toast('Vector không hợp lệ — cần mảng số, VD [0.1, -0.2, ...]', 'rose');
-          vector = v; paintVector(); toast(`Đã nhận vector ${v.length} chiều`, 'emerald');
+          vector = v; pastedVector = v; paintVector(); toast(`Đã nhận vector ${v.length} chiều`, 'emerald');
           return;
         }
         case 'recognize': {
           const doorName = $('#face-door').value;
-          if (!vector) return toast('Chưa có vector khuôn mặt', 'amber');
           if (!doorName) return toast('Nhà chưa có cửa — tạo cửa ở trang Cửa thông minh', 'amber');
+          // Nhận diện phải dùng khuôn mặt CHỤP MỚI từ camera (không dùng lại vector vừa đăng ký,
+          // nếu không sẽ luôn so vector với chính nó: khoảng cách 0, "khớp" 100%).
+          if (!stream && !pastedVector) return toast('Bật camera trước — hệ thống sẽ chụp khuôn mặt mới để so khớp', 'amber');
           await busy(b, async () => {
-            faceMsg('Đang so khớp…', 'text-sky-600');
+            let probe = null;
+            if (stream) {
+              faceMsg('Đang chụp khuôn mặt từ camera…', 'text-sky-600');
+              try { probe = await extractDescriptor(video); }
+              catch (err) { return fail(err, 'Không tải được mô hình nhận diện (kiểm tra Internet)'); }
+              if (!alive) return;
+              if (!probe) return faceMsg('Không thấy khuôn mặt trong khung hình — nhìn thẳng vào camera rồi thử lại', 'text-amber-600');
+            } else {
+              probe = pastedVector;   // chỉ để thử API khi không có camera
+            }
+            faceMsg('Đang so khớp với hồ sơ đã lưu…', 'text-sky-600');
             try {
-              const res = await api.ai.recognize(homeId, doorName, vector);
+              const res = await api.ai.recognize(homeId, doorName, probe);
               if (!alive) return;
               const matched = pickAny(res, 'matched', 'isMatch', 'recognized', 'granted', 'unlocked', 'success');
               const dist = Number(pickAny(res, 'distance', 'minDistance', 'euclideanDistance'));
@@ -271,7 +293,8 @@ export const aiPage = {
               const body = { userId, faceData: vector };
               if (expired) body.validTo = expired;          // BE nhận validFrom / validTo (YYYY-MM-DD = hết ngày đó)
               await api.ai.addFace(homeId, body);
-              toast('Đã lưu hồ sơ khuôn mặt', 'emerald');
+              vector = null; pastedVector = null; paintVector();   // vector đăng ký không dùng lại để nhận diện
+              toast('Đã lưu hồ sơ khuôn mặt — giờ bấm "Nhận diện & mở cửa" để thử', 'emerald');
               addLog('device', `Đăng ký hồ sơ khuôn mặt cho ${memberName(userId) ?? `user #${userId}`}`);
               loadProfiles();
             } catch (err) { fail(err, 'Không lưu được hồ sơ'); }
@@ -281,6 +304,24 @@ export const aiPage = {
         case 'reload-profiles':
           profiles = null; paintProfiles(); loadProfiles();
           return;
+        case 'delete-face': {
+          const profileId = b.dataset.val;
+          if (!profileId) return;
+      
+          if (!confirm(`Bạn có chắc chắn muốn xóa hồ sơ FaceID #${profileId} này không?`)) return;
+
+          await busy(b, async () => {
+            try {
+              await api.ai.removeFace(homeId, profileId);
+              toast('Đã xóa hồ sơ FaceID thành công', 'emerald');
+              addLog('device', `Xóa hồ sơ FaceID #${profileId}`);
+              await loadProfiles(); // Tải lại danh sách sau khi xóa
+            } catch (err) {
+              fail(err, 'Không xóa được hồ sơ FaceID');
+            }
+          });
+          return;
+      }
         default:
       }
     });
@@ -292,6 +333,14 @@ export const aiPage = {
       input.value = '';
     });
 
+    const paintAssistant = () => {
+      const el = $('#assistant-log');
+      el.innerHTML = state.assistant.length
+        ? state.assistant.slice(0, 5).map((m) => `<li class="flex gap-2"><span class="font-mono text-slate-400">${esc(fullTime(m.ts).slice(-8))}</span><span class="text-slate-700">${esc(m.text)}</span></li>`).join('')
+        : '<li class="text-slate-400">Chưa có phản hồi.</li>';
+    };
+
+    paintAssistant();
     paintVector();
     paintDoors();
     paintUserField();
@@ -299,13 +348,13 @@ export const aiPage = {
     loadMembers();
     loadProfiles();
     const off = onChange('doors', () => state.doors.map((d) => d.name).join('|'), paintDoors);
+    const offAssistant = on('assistant', paintAssistant);
     return () => {
       alive = false;
       off();
+      offAssistant();
       recog?.abort?.();
       stopCamera(stream, $('#cam'));
     };
   },
 };
-
-

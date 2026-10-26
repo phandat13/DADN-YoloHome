@@ -1,4 +1,4 @@
-// Cửa thông minh (UC 3.2): verify-pin (public), change-pin, pins, credentials, unlock, attempts, tạo cửa.
+// Cửa thông minh (UC 3.2): verify-pin (cần đăng nhập + DOOR_UNLOCK), change-pin, pins, credentials, unlock, attempts, tạo cửa.
 import { state, on, onChange, markDoorOpened, markDoorLocked, refreshHomeData, addLog } from '../store.js';
 import { api } from '../api.js';
 import { PIN_PATTERN } from '../config.js';
@@ -88,7 +88,7 @@ export const doorPage = {
             ${KEYS.map((k) => `<button type="button" data-act="key" data-val="${k}" class="py-3 rounded-lg font-mono font-bold active:scale-95 transition ${
               k === 'F' ? 'bg-sky-600 text-white hover:bg-sky-500' : k === 'C' ? 'bg-rose-50 text-rose-600 hover:bg-rose-100' : 'bg-slate-50 text-slate-800 hover:bg-slate-100'}">${k}</button>`).join('')}
           </div>
-          <p class="text-[11px] text-slate-400 mt-3">Phím giả lập remote: số = nhập, F = xác nhận, C = xoá. Mở cửa gọi API công khai <span class="font-mono">verify-pin</span>; sai 5 lần trong 10 phút sẽ bị tạm khoá (HTTP 429).</p>`,
+          <p class="text-[11px] text-slate-400 mt-3">Phím giả lập remote: số = nhập, F = xác nhận, C = xoá. Mở cửa gọi <span class="font-mono">verify-pin</span> (cần quyền DOOR_UNLOCK; bàn phím thật dùng x-iot-key); sai 5 lần trong 10 phút sẽ bị tạm khoá (HTTP 429).</p>`,
       });
     };
 

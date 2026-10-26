@@ -1,7 +1,7 @@
 const { pool } = require('../db');
 
 // Đảm bảo cửa trong URL thuộc đúng ngôi nhà trong URL (/homes/:homeId/doors/:doorName/...).
-// Thiếu bước này thì có thể thao tác cửa của nhà khác chỉ bằng cách đổi homeId.
+// Tên cửa chỉ duy nhất trong 1 nhà, nên luôn tra theo (Home_ID, tên) rồi dùng Smart_Door_ID cho các bước sau.
 const requireDoorInHome = async (req, res, next) => {
   try {
     const homeId = parseInt(req.params.homeId, 10);
@@ -14,6 +14,7 @@ const requireDoorInHome = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Cửa không tồn tại trong ngôi nhà này' });
     }
     req.door = rows[0];
+    req.doorRef = { id: rows[0].Smart_Door_ID, name: rows[0].Smart_Door_Name };
     next();
   } catch (err) {
     next(err);

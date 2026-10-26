@@ -39,7 +39,8 @@ function errorHandler(err, req, res, next) {
   res.status(statusCode).json({
     success: false,
     message,
-    stack: process.env.NODE_ENV === 'production' ? null : err.stack
+    // Chỉ trả stack trace khi chủ động bật NODE_ENV=development (mặc định không lộ đường dẫn mã nguồn)
+    ...(process.env.NODE_ENV === 'development' ? { stack: err.stack } : {}),
   });
 }
 

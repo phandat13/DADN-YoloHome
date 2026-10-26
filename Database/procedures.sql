@@ -1,3 +1,4 @@
+SET NAMES utf8mb4;
 USE smart_home;
 
 -- Quy ước giá trị trạng thái (chữ thường):
@@ -45,7 +46,7 @@ DROP PROCEDURE IF EXISTS sp_revoke_member_access$$
 CREATE PROCEDURE sp_revoke_member_access(IN p_user_id INT, IN p_home_id INT)
 BEGIN
     UPDATE Access_Credential ac
-    JOIN Smart_Door sd ON sd.Smart_Door_Name = ac.Smart_Door_Name
+    JOIN Smart_Door sd ON sd.Smart_Door_ID = ac.Smart_Door_ID
     SET ac.Credential_State = 'revoked'
     WHERE ac.User_ID = p_user_id AND sd.Home_ID = p_home_id
       AND LOWER(ac.Credential_State) = 'active';
@@ -408,12 +409,12 @@ END$$
 -- ===== Cửa mật mã (6.6, 6.7) =====
 -- Tạo PIN (chủ nhà cấp cho mình, thành viên hoặc khách; khách nên có Valid_To)
 DROP PROCEDURE IF EXISTS sp_create_access_credential$$
-CREATE PROCEDURE sp_create_access_credential(IN p_actor_id INT, IN p_door VARCHAR(100), IN p_target_user_id INT,
+CREATE PROCEDURE sp_create_access_credential(IN p_actor_id INT, IN p_door_id INT, IN p_target_user_id INT,
                                              IN p_pin VARCHAR(100), IN p_valid_from DATETIME,
                                              IN p_valid_to DATETIME, OUT p_credential_id INT)
 BEGIN
     DECLARE v_home INT DEFAULT NULL;
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = p_door;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = p_door_id;
     IF v_home IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cửa không tồn tại';
     END IF;
@@ -424,46 +425,46 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'PIN phải gồm 4-8 chữ số';
     END IF;
     -- trigger trg_access_credential_bi kiểm tra thành viên hợp lệ và khoảng thời gian
-    INSERT INTO Access_Credential (Credential_Value, Credential_State, Valid_From, Valid_To, User_ID, Smart_Door_Name)
-    VALUES (fn_hash_pin(p_door, p_target_user_id, p_pin), 'active', p_valid_from, p_valid_to,
-            p_target_user_id, p_door);
+    INSERT INTO Access_Credential (Credential_Value, Credential_State, Valid_From, Valid_To, User_ID, Smart_Door_ID)
+    VALUES (fn_hash_pin(p_door_id, p_target_user_id, p_pin), 'active', p_valid_from, p_valid_to,
+            p_target_user_id, p_door_id);
     SET p_credential_id = LAST_INSERT_ID();
     CALL sp_log_activity(p_actor_id, v_home, 'access_credential', 'create_pin', 'web', 'success');
 END$$
  
 -- Nhập PIN tại cửa. p_result: success | failed | locked_out
 DROP PROCEDURE IF EXISTS sp_verify_door_pin$$
-CREATE PROCEDURE sp_verify_door_pin(IN p_door VARCHAR(100), IN p_pin VARCHAR(100),
+CREATE PROCEDURE sp_verify_door_pin(IN p_door_id INT, IN p_pin VARCHAR(100),
                                     OUT p_result VARCHAR(20), OUT p_user_id INT)
 BEGIN
     DECLARE v_home INT DEFAULT NULL;
     DECLARE v_user INT DEFAULT NULL;
  
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = p_door;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = p_door_id;
     IF v_home IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cửa không tồn tại';
     END IF;
     SET p_user_id = NULL;
  
-    IF fn_count_failed_attempts(p_door, 10) >= 5 THEN
+    IF fn_count_failed_attempts(p_door_id, 10) >= 5 THEN
         -- khóa tạm: sai từ 5 lần trong 10 phút
-        INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, Smart_Door_Name)
-        VALUES ('pin', 'failed', 'locked_out', p_door);
+        INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, Smart_Door_ID)
+        VALUES ('pin', 'failed', 'locked_out', p_door_id);
         SET p_result = 'locked_out';
     ELSE
-        SET v_user = fn_verify_pin(p_door, p_pin);
+        SET v_user = fn_verify_pin(p_door_id, p_pin);
         IF v_user IS NULL THEN
-            INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, Smart_Door_Name)
-            VALUES ('pin', 'failed', 'wrong_or_expired_pin', p_door);
+            INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, Smart_Door_ID)
+            VALUES ('pin', 'failed', 'wrong_or_expired_pin', p_door_id);
             SET p_result = 'failed';
         ELSEIF NOT fn_has_permission(v_user, v_home, 'DOOR_UNLOCK') THEN
-            INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, User_ID, Smart_Door_Name)
-            VALUES ('pin', 'failed', 'no_permission', v_user, p_door);
+            INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, User_ID, Smart_Door_ID)
+            VALUES ('pin', 'failed', 'no_permission', v_user, p_door_id);
             SET p_result = 'failed';
         ELSE
-            INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_Name)
-            VALUES ('pin', 'success', v_user, p_door);
-            UPDATE Smart_Door SET Lock_Unlock_State = 'unlocked' WHERE Smart_Door_Name = p_door;
+            INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_ID)
+            VALUES ('pin', 'success', v_user, p_door_id);
+            UPDATE Smart_Door SET Lock_Unlock_State = 'unlocked' WHERE Smart_Door_ID = p_door_id;
             CALL sp_log_activity(v_user, v_home, 'smart_door', 'unlock_by_pin', 'pin', 'success');
             SET p_result = 'success';
             SET p_user_id = v_user;
@@ -476,17 +477,17 @@ DROP PROCEDURE IF EXISTS sp_change_door_pin$$
 CREATE PROCEDURE sp_change_door_pin(IN p_actor_id INT, IN p_credential_id INT, IN p_current_pin VARCHAR(100),
                                     IN p_new_pin VARCHAR(100), IN p_confirm_pin VARCHAR(100))
 BEGIN
-    DECLARE v_door VARCHAR(100) DEFAULT NULL;
+    DECLARE v_door INT DEFAULT NULL;
     DECLARE v_user INT DEFAULT NULL;
     DECLARE v_hash CHAR(64) DEFAULT NULL;
     DECLARE v_home INT DEFAULT NULL;
  
-    SELECT Smart_Door_Name, User_ID, Credential_Value INTO v_door, v_user, v_hash
+    SELECT Smart_Door_ID, User_ID, Credential_Value INTO v_door, v_user, v_hash
     FROM Access_Credential WHERE Credential_ID = p_credential_id;
     IF v_door IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Mật mã không tồn tại';
     END IF;
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = v_door;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = v_door;
  
     IF NOT fn_has_permission(p_actor_id, v_home, 'DOOR_MANAGE') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Chỉ chủ nhà mới được đổi mật mã';
@@ -515,7 +516,7 @@ CREATE PROCEDURE sp_revoke_credential(IN p_actor_id INT, IN p_credential_id INT)
 BEGIN
     DECLARE v_home INT DEFAULT NULL;
     SELECT sd.Home_ID INTO v_home
-    FROM Access_Credential ac JOIN Smart_Door sd ON sd.Smart_Door_Name = ac.Smart_Door_Name
+    FROM Access_Credential ac JOIN Smart_Door sd ON sd.Smart_Door_ID = ac.Smart_Door_ID
     WHERE ac.Credential_ID = p_credential_id;
     IF v_home IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Mật mã không tồn tại';
@@ -529,10 +530,10 @@ END$$
  
 -- Chủ nhà mở/khóa cửa từ xa
 DROP PROCEDURE IF EXISTS sp_set_door_state$$
-CREATE PROCEDURE sp_set_door_state(IN p_actor_id INT, IN p_door VARCHAR(100), IN p_state VARCHAR(20))
+CREATE PROCEDURE sp_set_door_state(IN p_actor_id INT, IN p_door_id INT, IN p_state VARCHAR(20))
 BEGIN
     DECLARE v_home INT DEFAULT NULL;
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = p_door;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = p_door_id;
     IF v_home IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cửa không tồn tại';
     END IF;
@@ -543,10 +544,10 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Không có quyền điều khiển cửa từ xa';
     END IF;
  
-    UPDATE Smart_Door SET Lock_Unlock_State = LOWER(p_state) WHERE Smart_Door_Name = p_door;
+    UPDATE Smart_Door SET Lock_Unlock_State = LOWER(p_state) WHERE Smart_Door_ID = p_door_id;
     IF LOWER(p_state) = 'unlocked' THEN
-        INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_Name)
-        VALUES ('remote', 'success', p_actor_id, p_door);
+        INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_ID)
+        VALUES ('remote', 'success', p_actor_id, p_door_id);
     END IF;
     CALL sp_log_activity(p_actor_id, v_home, 'smart_door', CONCAT('set_', LOWER(p_state)), 'remote', 'success');
 END$$
@@ -619,7 +620,7 @@ END$$
  
 -- AI service trả kết quả nhận diện tại cửa. p_reliability: 0..100. p_decision: allowed | denied
 DROP PROCEDURE IF EXISTS sp_record_face_recognition$$
-CREATE PROCEDURE sp_record_face_recognition(IN p_door VARCHAR(100), IN p_face_profile_id INT,
+CREATE PROCEDURE sp_record_face_recognition(IN p_door_id INT, IN p_face_profile_id INT,
                                             IN p_label VARCHAR(100), IN p_reliability DECIMAL(5,2),
                                             IN p_threshold DECIMAL(5,2), OUT p_decision VARCHAR(10))
 BEGIN
@@ -637,7 +638,7 @@ BEGIN
         RESIGNAL;
     END;
  
-    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_Name = p_door;
+    SELECT Home_ID INTO v_home FROM Smart_Door WHERE Smart_Door_ID = p_door_id;
     IF v_home IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cửa không tồn tại';
     END IF;
@@ -665,18 +666,18 @@ BEGIN
  
     START TRANSACTION;
     INSERT INTO Face_Recognition_Event (Reliability, Label, Recognization_Result,
-                                        Face_Profile_ID, Smart_Door_Name, Home_ID)
-    VALUES (p_reliability, p_label, v_result, v_profile, p_door, v_home);
+                                        Face_Profile_ID, Smart_Door_ID, Home_ID)
+    VALUES (p_reliability, p_label, v_result, v_profile, p_door_id, v_home);
  
     IF v_reason IS NULL THEN
-        INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_Name)
-        VALUES ('face', 'success', v_user, p_door);
-        UPDATE Smart_Door SET Lock_Unlock_State = 'unlocked' WHERE Smart_Door_Name = p_door;
+        INSERT INTO Access_Attempt (Verify_Method, Access_Result, User_ID, Smart_Door_ID)
+        VALUES ('face', 'success', v_user, p_door_id);
+        UPDATE Smart_Door SET Lock_Unlock_State = 'unlocked' WHERE Smart_Door_ID = p_door_id;
         CALL sp_log_activity(v_user, v_home, 'smart_door', 'unlock_by_face', 'face', 'success');
         SET p_decision = 'allowed';
     ELSE
-        INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, User_ID, Smart_Door_Name)
-        VALUES ('face', 'failed', v_reason, v_user, p_door);
+        INSERT INTO Access_Attempt (Verify_Method, Access_Result, Failure_Reason, User_ID, Smart_Door_ID)
+        VALUES ('face', 'failed', v_reason, v_user, p_door_id);
         SET p_decision = 'denied';
     END IF;
     COMMIT;

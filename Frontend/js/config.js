@@ -1,12 +1,18 @@
 // Cấu hình tập trung: sửa ở đây thay vì tìm trong HTML/JS.
 
+const DEV_STATIC_PORTS = ['8000', '5500', '5173'];
+const BACKEND_ORIGIN = DEV_STATIC_PORTS.includes(location.port) || location.protocol === 'file:'
+  ? 'http://localhost:3000'
+  : location.origin;
+
 export const CONFIG = {
-  API_BASE_URL: 'http://localhost:3000/api',   // Base URL HTTP API (tài liệu BE mục 1)
-  SOCKET_URL: 'http://localhost:3000',         // Base URL Socket.IO
-  COMMAND_SOURCE: 'USER',                      // sourceType gửi kèm lệnh (USER | VOICE_COMMAND | SCHEDULE | SYSTEM)
+  // Mở qua Backend (http://localhost:3000) thì gọi API cùng địa chỉ; mở qua server tĩnh riêng (8000, 5500...) thì gọi cổng 3000
+  API_BASE_URL: `${BACKEND_ORIGIN}/api`,
+  SOCKET_URL: BACKEND_ORIGIN,
 };
 
-// Ngưỡng cảnh báo. Backend chưa có API ngưỡng nên giá trị được lưu trong localStorage.
+// Ngưỡng cảnh báo: giá trị thật được tải từ Backend (GET /homes/:homeId/settings) và ghi đè vào THRESHOLDS.
+// DEFAULT_THRESHOLDS dùng cho nút "Khôi phục mặc định" (trùng giá trị mặc định của bảng Home_Setting).
 export const DEFAULT_THRESHOLDS = Object.freeze({
   TEMP_MAX: 35,            // °C - vượt ngưỡng: cảnh báo + quạt 100% (chế độ tự động)
   HUMIDITY_MIN: 40,        // %
@@ -25,7 +31,7 @@ export const TIMING = {
 export const DEVICE = {
   brand: 'Aetherium',
   platform: 'AIoT Platform',
-  logo: 'https://lh3.googleusercontent.com/aida/AEtjO1VsqoZK3ugDy6qL5JEZHYI1KojDup7qthkuTb5wNH8_tzSQXeCswV53wBVAsXQykFVnIhqWLWPfQa_gJ8KGAnxoUvvVvQf71GHo4Qe2RZeSxs1DZMqMUY5GhfE1pLvBbWrxHIMJuP0JKxID1xVHwdN02dcc-m-trad8h2NqKCJRm1A99rz-uTvefdohh9TzXGS9c0Mu5MLe1NTE5XPhrdXrgPl1cF80zIKeestniksmUke631sbuuzKiw',
+  logo: 'assets/logo.svg',                      // lưu trong repo (link ảnh ngoài có thể hết hạn)
   board: 'Yolo:Bit',
   broker: 'io.adafruit.com',                    // Backend kết nối MQTT tới Adafruit IO
   lcdAddress: '0x27',
@@ -33,7 +39,8 @@ export const DEVICE = {
 
 export const PIN_PATTERN = /^\d{4,8}$/;                 // mã PIN 4–8 chữ số
 export const MEMBER_ROLES = ['Member', 'Guest'];         // vai trò có thể gán khi mời thành viên
-export const DEVICE_TYPES = [['LIGHT', 'Đèn'], ['FAN', 'Quạt'], ['SENSOR', 'Cụm cảm biến'], ['BUZZER', 'Còi']];
+export const DEVICE_TYPES = [['LIGHT', 'Đèn RGB'], ['FAN', 'Quạt'], ['SENSOR', 'Cụm cảm biến'], ['BUZZER', 'Còi']];
+export const LIGHT_COLORS = [['#FFFFFF', 'Trắng'], ['#FF0000', 'Đỏ'], ['#00FF00', 'Xanh lá'], ['#0000FF', 'Xanh dương'], ['#FFFF00', 'Vàng'], ['#800080', 'Tím']];
 export const SENSOR_TYPES = [                            // [dataType, đơn vị, nhãn]
   ['Temperature', '°C', 'Nhiệt độ'],
   ['Humidity', '%', 'Độ ẩm'],

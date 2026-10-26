@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -15,11 +16,13 @@ const iotRouter = require('./routes/iot');
 const aiRouter = require('./routes/ai');
 const notificationRouter = require('./routes/notification');
 const activityLogRouter = require('./routes/activityLog');
+const settingsRouter = require('./routes/settings');
 
 const app = express();
 
 // 1. Gắn các middleware chung
-app.use(helmet());
+// CSP tắt vì giao diện dùng Tailwind / Socket.IO / face-api.js từ CDN và style inline
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 
 // Cấu hình CORS an toàn hỗ trợ credentials cho Frontend (danh sách trong config.js / CORS_ORIGIN)
 const allowedOrigins = config.corsOrigins;
@@ -64,8 +67,12 @@ app.use('/api/homes/:homeId/doors', doorRoutes);
 app.use('/api/homes/:homeId/iot', iotRouter);
 app.use('/api/homes/:homeId/ai', aiRouter);
 app.use('/api/homes/:homeId/activity-logs', activityLogRouter);
+app.use('/api/homes/:homeId/settings', settingsRouter);
 app.use('/api/homes', homeRoutes);
 app.use('/api/notifications', notificationRouter);
+
+// Phục vụ luôn giao diện web (thư mục Frontend) tại http://localhost:3000 -> chỉ cần chạy 1 server
+app.use(express.static(path.join(__dirname, '..', '..', 'Frontend')));
 
 // 4. Xử lý 404 và Error Handler (bắt buộc đặt cuối cùng)
 app.use(notFound);

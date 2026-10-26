@@ -1,3 +1,5 @@
+SET NAMES utf8mb4;
+
 DROP DATABASE IF EXISTS smart_home;
 CREATE DATABASE smart_home CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE smart_home;
@@ -99,16 +101,14 @@ CREATE TABLE Activity_Log (
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
--- Smart_Door_Name là khóa mà Access_Credential / Access_Attempt / Face_Recognition_Event tham chiếu (FK)
--- nên phải UNIQUE trên toàn hệ thống: tránh lỗi "Result consisted of more than one row" trong các procedure
--- khi 2 nhà đặt trùng tên cửa, và để FK hợp lệ trên MySQL 8.4+ (không cho FK trỏ vào cột không UNIQUE).
+-- Tên cửa chỉ cần duy nhất TRONG MỘT NHÀ (2 nhà khác nhau đều có thể có "Cửa chính").
+-- Các bảng con tham chiếu cửa bằng Smart_Door_ID.
 CREATE TABLE Smart_Door (
 	Smart_Door_ID INT AUTO_INCREMENT PRIMARY KEY,
     Smart_Door_Name VARCHAR(100) NOT NULL,
     Working_State VARCHAR(30) NOT NULL DEFAULT 'enabled',
     Lock_Unlock_State ENUM('Locked','Unlocked') NOT NULL DEFAULT 'Locked',
     Home_ID INT NOT NULL,
-    UNIQUE KEY `uq_smart_door_name` (`Smart_Door_Name`),
     UNIQUE KEY `idx_home_door_unique` (`Home_ID`, `Smart_Door_Name`),
     CONSTRAINT fk_door_home FOREIGN KEY (Home_ID)
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
@@ -137,12 +137,12 @@ CREATE TABLE Face_Recognition_Event (
     Recognization_Result VARCHAR(50),
     `Time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     Face_Profile_ID INT NULL,                        -- có thể là người lạ
-    Smart_Door_Name VARCHAR(100) NOT NULL,
+    Smart_Door_ID INT NOT NULL,
     Home_ID INT NOT NULL,
     CONSTRAINT fk_fre_profile FOREIGN KEY (Face_Profile_ID)
         REFERENCES Face_Profile(Face_Profile_ID) ON DELETE SET NULL ON UPDATE CASCADE,
-    CONSTRAINT fk_fre_door FOREIGN KEY (Smart_Door_Name)
-        REFERENCES Smart_Door(Smart_Door_Name) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_fre_door FOREIGN KEY (Smart_Door_ID)
+        REFERENCES Smart_Door(Smart_Door_ID) ON DELETE CASCADE ON UPDATE CASCADE,
 	CONSTRAINT fk_fre_home FOREIGN KEY (Home_ID)
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -154,11 +154,11 @@ CREATE TABLE Access_Credential (
     Valid_From DATETIME,
     Valid_To DATETIME,
     User_ID INT NOT NULL,
-    Smart_Door_Name VARCHAR(100) NOT NULL,
+    Smart_Door_ID INT NOT NULL,
     CONSTRAINT fk_ac_user FOREIGN KEY (User_ID)
         REFERENCES `User`(User_ID) ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT fk_ac_door FOREIGN KEY (Smart_Door_Name)
-        REFERENCES Smart_Door(Smart_Door_Name) ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT fk_ac_door FOREIGN KEY (Smart_Door_ID)
+        REFERENCES Smart_Door(Smart_Door_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE Access_Attempt (
@@ -168,11 +168,11 @@ CREATE TABLE Access_Attempt (
     `Time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     Failure_Reason VARCHAR(255),
     User_ID INT NULL,
-    Smart_Door_Name VARCHAR(100) NOT NULL,
+    Smart_Door_ID INT NOT NULL,
     CONSTRAINT fk_aa_user FOREIGN KEY (User_ID)
         REFERENCES `User`(User_ID) ON DELETE SET NULL ON UPDATE CASCADE,
-    CONSTRAINT fk_aa_door FOREIGN KEY (Smart_Door_Name)
-        REFERENCES Smart_Door(Smart_Door_Name) ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT fk_aa_door FOREIGN KEY (Smart_Door_ID)
+        REFERENCES Smart_Door(Smart_Door_ID) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE Device_Type (
@@ -203,6 +203,7 @@ CREATE TABLE Device (
     Home_ID INT NOT NULL,
     Type_Code VARCHAR(50) NOT NULL,
     Feed_Key VARCHAR(100) NULL,
+    Color VARCHAR(7) NULL COMMENT 'Màu đèn RGB dạng #RRGGBB (kênh V11 trong giáo trình)',
     Controller_ID INT NULL,
     CONSTRAINT fk_dev_home FOREIGN KEY (Home_ID)
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -274,6 +275,19 @@ CREATE TABLE Sensor_Record (
   CONSTRAINT `fk_record_sensor` FOREIGN KEY (`Sensor_ID`) REFERENCES `Sensor` (`Sensor_ID`) ON DELETE CASCADE
 );
 
+-- Ngưỡng cảnh báo + chế độ tự động của từng nhà (trước đây lưu ở localStorage của trình duyệt)
+CREATE TABLE Home_Setting (
+    Home_ID INT PRIMARY KEY,
+    Temp_Max DOUBLE NOT NULL DEFAULT 35,
+    Humidity_Min DOUBLE NOT NULL DEFAULT 40,
+    Humidity_Max DOUBLE NOT NULL DEFAULT 70,
+    Light_Min DOUBLE NOT NULL DEFAULT 200,
+    Auto_Mode BOOLEAN NOT NULL DEFAULT TRUE,
+    Updated_At DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_hs_home FOREIGN KEY (Home_ID)
+        REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 CREATE TABLE System_Event (
     Event_ID INT AUTO_INCREMENT PRIMARY KEY,
     Connection_State VARCHAR(30),
@@ -289,5 +303,5 @@ CREATE INDEX idx_device_state ON Device_State(Device_ID, Changed_At);
 CREATE INDEX idx_hm_home ON Home_Member(Home_ID);
 CREATE INDEX idx_notification_unread ON Notification(User_ID, Unread_Read);
 CREATE INDEX idx_device_command_history ON Device_Command(Device_ID, Excute_Time);
-CREATE INDEX idx_access_credential ON Access_Credential(Smart_Door_Name, Credential_State);
+CREATE INDEX idx_access_credential ON Access_Credential(Smart_Door_ID, Credential_State);
 

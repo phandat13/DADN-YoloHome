@@ -12,6 +12,7 @@ export function sensorKind(dataType = '', unit = '') {
 }
 
 const KIND_RE = {
+  buzzer: /buzzer|\bcoi\b/,
   sensor: /sensor|dht|ldr|pir|cam bien/,
   door: /door|servo|lock|\bcua\b/,
   light: /light|lamp|led|\bden\b/,
@@ -20,9 +21,9 @@ const KIND_RE = {
 // typeCode được ưu tiên (LIGHT_SENSOR → cảm biến); nếu không rõ mới xét tên (Quạt cửa sổ → quạt).
 export function deviceKind(typeCode = '', name = '') {
   const t = normText(typeCode);
-  for (const k of ['sensor', 'door', 'light', 'fan']) if (t && KIND_RE[k].test(t)) return k;
+  for (const k of ['buzzer', 'sensor', 'door', 'light', 'fan']) if (t && KIND_RE[k].test(t)) return k;
   const n = normText(name);
-  for (const k of ['light', 'fan', 'sensor', 'door']) if (n && KIND_RE[k].test(n)) return k;
+  for (const k of ['buzzer', 'light', 'fan', 'sensor', 'door']) if (n && KIND_RE[k].test(n)) return k;
   return 'other';
 }
 
@@ -79,15 +80,15 @@ export const normHome = (h) => ({
   raw: h,
 });
 
-export function normDevice(d, cache = {}) {
+export function normDevice(d) {
   const id = pick(d, 'deviceId', 'id');
   const typeCode = label(pick(d, 'typeCode', 'deviceType', 'type', 'typeName')).toUpperCase();
   const name = label(pick(d, 'deviceName', 'name')) || `Thiết bị #${id}`;
   const kind = deviceKind(typeCode, name);
   const workingRaw = pick(d, 'availableWorkingState', 'workingState', 'currentState', 'state');
   const connRaw = pick(d, 'connectionState', 'connectionStatus', 'connection');
-  // Ưu tiên trạng thái lệnh gần nhất do trình duyệt gửi (BE có thể chưa cập nhật availableWorkingState).
-  const st = cache[String(id)] ?? parseWorking(workingRaw) ?? { on: false, speed: 0 };
+  // Backend là nguồn trạng thái duy nhất (đã đồng bộ cả thay đổi từ dashboard Adafruit / phần cứng)
+  const st = parseWorking(workingRaw) ?? { on: false, speed: 0 };
   const speed = kind === 'fan' ? clamp(Number(st.speed ?? (st.on ? 100 : 0)) || 0, 0, 100) : (st.on ? 100 : 0);
   return {
     id, name, typeCode, kind,
@@ -96,6 +97,7 @@ export function normDevice(d, cache = {}) {
     online: parseOnline(connRaw),
     connection: label(connRaw),
     working: label(workingRaw),
+    color: label(pick(d, 'color')).toUpperCase() || null,   // đèn RGB: #RRGGBB
     controllerId: label(pick(d, 'controllerId', 'controller')),
     raw: d,
   };
@@ -213,17 +215,3 @@ export const normFaceProfile = (f) => {
     raw: f,
   };
 };
-
-// ---- Giọng nói: suy ra thay đổi để phản ánh lên giao diện sau khi BE xử lý xong ----
-export function parseVoiceCommand(text) {
-  const t = normText(text);
-  const on = /\b(bat|mo)\b/.test(t);
-  const off = /\b(tat|dung)\b/.test(t);
-  if (!on && !off) return null;
-  const pct = t.match(/(\d{1,3})\s*(%|phan tram)/);
-  if (/\bden\b/.test(t)) return { kind: 'light', on: on && !off };
-  if (/\bquat\b/.test(t)) return { kind: 'fan', speed: off && !on ? 0 : pct ? clamp(+pct[1], 0, 100) : 100 };
-  return null;
-}
-
-

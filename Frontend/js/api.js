@@ -125,8 +125,14 @@ export const api = {
     create: (homeId, body) => request('POST', `${H(homeId)}/devices`, { body }),
     update: (homeId, deviceId, body) => request('PATCH', `${H(homeId)}/devices/${enc(deviceId)}`, { body }),
     remove: (homeId, deviceId) => request('DELETE', `${H(homeId)}/devices/${enc(deviceId)}`),
-    command: (homeId, deviceId, action, payload = {}) => request('POST', `${H(homeId)}/devices/${enc(deviceId)}/commands`,
-      { body: { action, payload, sourceType: CONFIG.COMMAND_SOURCE } }),
+    // body: { action: 'TURN_ON' | 'TURN_OFF' | 'SET_SPEED' | 'SET_COLOR', speed?, color? }
+    command: (homeId, deviceId, body) => request('POST', `${H(homeId)}/devices/${enc(deviceId)}/commands`, { body }),
+  },
+  // Ngưỡng cảnh báo + chế độ tự động (lưu ở Backend, dùng chung cho mọi thành viên)
+  settings: {
+    get: (homeId) => request('GET', `${H(homeId)}/settings`),
+    update: (homeId, body) => request('PUT', `${H(homeId)}/settings`, { body }),
+    setMode: (homeId, autoMode) => request('PUT', `${H(homeId)}/settings/mode`, { body: { autoMode } }),
   },
   // 3.5 Smart door
   doors: {
@@ -140,6 +146,7 @@ export const api = {
     revoke: (homeId, doorName, credentialId) => request('DELETE', `${DOOR(homeId, doorName)}/credentials/${enc(credentialId)}`),
     unlock: (homeId, doorName, state = 'unlocked') => request('POST', `${DOOR(homeId, doorName)}/unlock`, { body: { state } }),
     attempts: (homeId, doorName) => request('GET', `${DOOR(homeId, doorName)}/attempts`),
+    // Cần đăng nhập + quyền DOOR_UNLOCK (bàn phím thật dùng x-iot-key)
     verifyPin: (homeId, doorName, pin) => request('POST', `${DOOR(homeId, doorName)}/verify-pin`, { body: { pin } }),
   },
   // 3.6 AI
@@ -150,6 +157,7 @@ export const api = {
     recognize: (homeId, doorName, inputFaceVector) => request('POST',
       `${H(homeId)}/ai/doors/${enc(doorName)}/face-recognition`, { body: { inputFaceVector } }),
     voice: (homeId, commandDetail) => request('POST', `${H(homeId)}/ai/voice-commands`, { body: { commandDetail } }),
+    removeFace: (homeId, profileId) => request('DELETE', `${H(homeId)}/ai/face-profiles/${enc(profileId)}`),
   },
   // 3.7 IoT telemetry
   iot: {

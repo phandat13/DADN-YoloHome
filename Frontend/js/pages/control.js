@@ -1,13 +1,13 @@
-// Điều khiển thiết bị (UC 3.1): POST /devices/:deviceId/commands (TURN_ON / TURN_OFF / SET_SPEED)
+// Điều khiển thiết bị (UC 3.1): POST /devices/:deviceId/commands (TURN_ON / TURN_OFF / SET_SPEED / SET_COLOR)
 // + quản lý thiết bị: POST / PATCH / DELETE /homes/:homeId/devices
 import { state, on, controlDevice, setMode, refreshHomeData } from '../store.js';
 import { api } from '../api.js';
-import { DEVICE_TYPES } from '../config.js';
+import { DEVICE_TYPES, LIGHT_COLORS } from '../config.js';
 import { esc } from '../utils/fields.js';
 import { panel, pageTitle, toggle, badge, segmented, button, field, inputCls, emptyState, loadingBlock, errorBlock, toast, busy, formValues, fail } from '../ui.js';
 
-const ICON = { light: 'lightbulb', fan: 'mode_fan', other: 'power', sensor: 'sensors', door: 'door_front' };
-const KIND_LABEL = { light: 'Đèn', fan: 'Quạt', other: 'Thiết bị', sensor: 'Cảm biến', door: 'Cửa' };
+const ICON = { light: 'lightbulb', fan: 'mode_fan', buzzer: 'notifications_active', other: 'power', sensor: 'sensors', door: 'door_front' };
+const KIND_LABEL = { light: 'Đèn', fan: 'Quạt', buzzer: 'Còi', other: 'Thiết bị', sensor: 'Cảm biến', door: 'Cửa' };
 const connBadge = (d) => (d.online === true ? badge(d.connection || 'Online', 'emerald')
   : d.online === false ? badge(d.connection || 'Offline', 'rose') : badge(d.connection || 'Không rõ', 'slate'));
 
@@ -33,11 +33,21 @@ export const controlPage = {
         </div>${ctrl}
       </div>`;
 
-    const control = (d) => (d.kind === 'fan'
-      ? `<div class="flex items-center gap-3 shrink-0">
+    const colorPicker = (d) => `
+      <label class="relative w-8 h-8 rounded-lg ring-1 ring-slate-200 cursor-pointer overflow-hidden shrink-0" title="Màu đèn (V11)">
+        <input type="color" list="light-colors" value="${esc((d.color || '#FFFFFF').toLowerCase())}" data-act="color" data-id="${esc(d.id)}"
+          class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+        <span class="block w-full h-full" style="background:${esc(d.color || '#FFFFFF')}"></span>
+      </label>`;
+    const control = (d) => {
+      if (d.kind === 'fan') {
+        return `<div class="flex items-center gap-3 shrink-0">
            <input type="range" min="0" max="100" step="10" value="${d.speed ?? 0}" data-act="fan" data-id="${esc(d.id)}" class="w-36 accent-sky-600">
-           <b class="w-11 text-right font-mono text-sm text-slate-700" data-fan-val="${esc(d.id)}">${d.speed ?? 0}%</b></div>`
-      : toggle(d.on, 'toggle', `data-id="${esc(d.id)}"`));
+           <b class="w-11 text-right font-mono text-sm text-slate-700" data-fan-val="${esc(d.id)}">${d.speed ?? 0}%</b></div>`;
+      }
+      if (d.kind === 'light') return `<div class="flex items-center gap-3 shrink-0">${colorPicker(d)}${toggle(d.on, 'toggle', `data-id="${esc(d.id)}"`)}</div>`;
+      return toggle(d.on, 'toggle', `data-id="${esc(d.id)}"`);
+    };
 
     const formatWorkingState = (d) => {
       if (d.kind === 'fan') {
@@ -48,7 +58,7 @@ export const controlPage = {
     };
 
     const paintDev = () => {
-      const list = state.devices.filter((d) => ['light', 'fan', 'other'].includes(d.kind));
+      const list = state.devices.filter((d) => ['light', 'fan', 'buzzer', 'other'].includes(d.kind));
 
       // ĐỒNG BỘ TRẠNG THÁI TỪ BACKEND/STORE CHO NÚT SWITCH VÀ THANH TRƯỢT
       list.forEach((d) => {
@@ -71,16 +81,16 @@ export const controlPage = {
       let body;
       if (state.errors.devices && !list.length) body = errorBlock(`Không tải được thiết bị: ${state.errors.devices}`);
       else if (state.loading && !list.length) body = loadingBlock();
-      else if (!list.length) body = emptyState('devices_other', 'Chưa có thiết bị điều khiển', 'Thêm đèn (LIGHT) hoặc quạt (FAN) ở khung "Thêm thiết bị".');
+      else if (!list.length) body = emptyState('devices_other', 'Chưa có thiết bị điều khiển', 'Thêm đèn (LIGHT), quạt (FAN) hoặc còi (BUZZER) ở khung "Thêm thiết bị".');
       else body = list.map((d) => row(ICON[d.kind], esc(d.name), `<span>${KIND_LABEL[d.kind]} · ${esc(d.typeCode || '—')} · ID ${esc(d.id)}</span>${connBadge(d)}`, control(d))).join('');
 
       $('#dev-panel').innerHTML = panel({
         title: 'Thiết bị ngoại vi', icon: 'tune',
         right: segmented([['auto', 'Tự động'], ['manual', 'Thủ công']], state.mode, 'mode'),
         body: `
-          ${state.mode === 'auto' ? '<p class="text-xs text-sky-700 bg-sky-50 rounded-lg px-3 py-2 mb-2">Chế độ tự động: đèn theo PIR/ánh sáng, quạt theo nhiệt độ (lệnh gửi thật xuống Backend). Thao tác tay bên dưới sẽ chuyển sang thủ công.</p>' : ''}
+          ${state.mode === 'auto' ? '<p class="text-xs text-sky-700 bg-sky-50 rounded-lg px-3 py-2 mb-2">Chế độ tự động chạy trên Backend (kể cả khi không mở web): đèn theo PIR/ánh sáng, quạt và còi theo nhiệt độ. Thao tác tay bên dưới sẽ chuyển cả nhà sang thủ công.</p>' : ''}
           ${body}
-          ${row('notifications_active', 'Còi cảnh báo', '<span>Mạch tự kêu khi nhiệt độ vượt ngưỡng — hiển thị theo cảnh báo</span>', badge(state.buzzer ? 'ĐANG KÊU' : 'Tắt', state.buzzer ? 'rose' : 'slate'))}
+          <datalist id="light-colors">${LIGHT_COLORS.map(([c]) => `<option value="${c.toLowerCase()}"></option>`).join('')}</datalist>
           ${row('door_front', 'Cửa', `<span>${state.doors.length} cửa · mở bằng mã PIN, FaceAI hoặc từ xa</span>`,
             `<div class="flex items-center gap-2 shrink-0">${badge(state.doorOpen ? 'ĐANG MỞ' : 'Đóng', state.doorOpen ? 'emerald' : 'slate')}<a href="#/door" class="text-xs font-semibold text-sky-600 hover:text-sky-700">Mở trang cửa →</a></div>`)}`,
       });
@@ -89,7 +99,7 @@ export const controlPage = {
     $('#add-panel').innerHTML = panel({ title: 'Thêm thiết bị', icon: 'add_circle', body: `
       <form id="add-device" class="space-y-3">
         ${field('Tên thiết bị *', `<input name="deviceName" required class="${inputCls}" placeholder="VD: Đèn phòng khách">`)}
-        ${field('Mã loại (typeCode) *', `<input name="typeCode" required list="type-codes" class="${inputCls} uppercase" placeholder="LIGHT">`, 'Gợi ý: LIGHT (đèn), FAN (quạt), SENSOR (cụm cảm biến)…')}
+        ${field('Mã loại (typeCode) *', `<input name="typeCode" required list="type-codes" class="${inputCls} uppercase" placeholder="LIGHT">`, 'Gợi ý: LIGHT (đèn RGB), FAN (quạt), BUZZER (còi), SENSOR (cụm cảm biến)')}
         <datalist id="type-codes">${DEVICE_TYPES.map(([c, l]) => `<option value="${c}">${l}</option>`).join('')}</datalist>
         ${button('Đăng ký thiết bị', { type: 'submit', icon: 'add' })}
       </form>` });
@@ -138,7 +148,11 @@ export const controlPage = {
       const { act, val } = b.dataset;
       const d = find(b.dataset.id ?? val);
       if (act === 'reload') return busy(b, () => refreshHomeData());
-      if (act === 'mode') return setMode(val);
+      if (act === 'mode') {
+        try { await setMode(val); toast(val === 'auto' ? 'Đã bật chế độ tự động' : 'Đã chuyển sang thủ công', 'sky'); }
+        catch (err) { fail(err, 'Không đổi được chế độ (cần quyền DEVICE_CONTROL)'); }
+        return;
+      }
 
       // Bật/tắt công tắc đèn
       if (act === 'toggle' && d) {
@@ -198,8 +212,21 @@ export const controlPage = {
       }
     });
 
-    // Nhả tay khỏi slider mới bắn API gửi lệnh xuống MQTT
+    // Nhả tay khỏi slider / chọn xong màu mới gửi lệnh xuống MQTT
     root.addEventListener('change', async (e) => {
+      if (e.target.dataset.act === 'color') {
+        const d = find(e.target.dataset.id);
+        if (!d) return;
+        const color = e.target.value.toUpperCase();
+        try {
+          await controlDevice(d, { color });
+          toast(`Đã đổi màu ${d.name}: ${color}`, 'emerald');
+        } catch (err) {
+          paintDev();
+          fail(err, `Không đổi được màu ${d.name}`);
+        }
+        return;
+      }
       if (e.target.dataset.act !== 'fan') return;
       const d = find(e.target.dataset.id);
       if (d) {
@@ -243,7 +270,7 @@ export const controlPage = {
     paintDev();
     paintManage();
     const offs = [
-      ...['devices', 'loading', 'alerts', 'door', 'doors'].map((e) => on(e, paintDev)),
+      ...['devices', 'loading', 'alerts', 'door', 'doors', 'settings'].map((e) => on(e, paintDev)),
       on('devices', () => { if (editing == null) paintManage(); }),
     ];
     return () => offs.forEach((off) => off());

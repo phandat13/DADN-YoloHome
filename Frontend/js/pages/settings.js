@@ -1,4 +1,4 @@
-// Cài đặt: ngưỡng cảnh báo (cục bộ) + cảm biến IoT (GET/POST /iot/sensors, POST /telemetry) + thông tin kết nối.
+// Cài đặt: ngưỡng cảnh báo (lưu ở Backend: GET/PUT /homes/:homeId/settings) + cảm biến IoT (GET/POST /iot/sensors, POST /telemetry) + thông tin kết nối.
 import { THRESHOLDS, CONFIG, SENSOR_TYPES, DATA_QUALITIES } from '../config.js';
 import { state, on, onChange, applyThresholds, resetThresholds, refreshHomeData } from '../store.js';
 import { api } from '../api.js';
@@ -6,7 +6,7 @@ import { esc, hhmm, idValue } from '../utils/fields.js';
 import { panel, pageTitle, button, field, inputCls, emptyState, errorBlock, linkButton, toast, busy, formValues, fail } from '../ui.js';
 
 const FIELDS = [
-  ['TEMP_MAX', 'Nhiệt độ tối đa', '°C', 'Vượt ngưỡng: cảnh báo, quạt 100% (chế độ tự động)'],
+  ['TEMP_MAX', 'Nhiệt độ tối đa', '°C', 'Vượt ngưỡng: cảnh báo, quạt 100% + bật còi (chế độ tự động)'],
   ['HUMIDITY_MIN', 'Độ ẩm tối thiểu', '%', 'Dưới mức này: cảnh báo độ ẩm'],
   ['HUMIDITY_MAX', 'Độ ẩm tối đa', '%', 'Trên mức này: cảnh báo độ ẩm'],
   ['LIGHT_MIN', 'Ánh sáng tối thiểu', 'Lux', 'Dưới mức này: tự bật đèn (chế độ tự động)'],
@@ -29,7 +29,7 @@ export const settingsPage = {
               ${button('Lưu ngưỡng', { type: 'submit' })}
               ${button('Khôi phục mặc định', { act: 'reset', tone: 'secondary' })}
             </div>
-            <p class="text-[11px] text-slate-400">Backend chưa có API ngưỡng nên giá trị được lưu trên trình duyệt này.</p>
+            <p class="text-[11px] text-slate-400">Ngưỡng lưu ở Backend, áp dụng cho mọi thành viên của nhà. Cần quyền DEVICE_MANAGE để sửa.</p>
           </form>` })}
         <div id="rules" class="lg:col-span-5"></div>
       </div>
@@ -46,11 +46,11 @@ export const settingsPage = {
     const paintRules = () => {
       $('#rules').innerHTML = panel({ title: 'Quy tắc tự động', icon: 'rule', body: `
         <ul class="text-sm text-slate-600 space-y-2 list-disc pl-5">
-          <li>Số liệu cảm biến đến tức thời qua Socket.IO; REST làm mới mỗi 30 giây.</li>
-          <li>Nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C: cảnh báo, quạt 100% (chế độ tự động).</li>
+          <li>Quy tắc chạy trên Backend mỗi khi có số liệu mới — không cần mở web.</li>
+          <li>Nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C: cảnh báo, quạt 100% và bật còi (chế độ tự động).</li>
           <li>PIR phát hiện chuyển động hoặc ánh sáng &lt; ${THRESHOLDS.LIGHT_MIN} Lux: bật đèn.</li>
-          <li>Chỉ tự động hoá theo số liệu mới (≤ 10 phút); lệnh gửi qua API điều khiển thiết bị.</li>
-          <li>Mọi cảnh báo được ghi vào mục Cảnh báo &amp; Lịch sử.</li>
+          <li>Chỉ tự động hoá theo số liệu mới (≤ 10 phút). Điều khiển tay sẽ chuyển nhà sang thủ công.</li>
+          <li>Cảnh báo mới được gửi vào Thông báo của chủ nhà và hiện trên LCD qua trợ lý.</li>
         </ul>` });
     };
     const paintSocket = () => {
@@ -137,10 +137,14 @@ export const settingsPage = {
       const b = e.target.closest('[data-act]');
       if (!b) return;
       if (b.dataset.act === 'reset') {
-        resetThresholds();
-        FIELDS.forEach(([k]) => { $(`[name=${k}]`).value = THRESHOLDS[k]; });
-        paintRules();
-        toast('Đã khôi phục mặc định', 'sky');
+        await busy(b, async () => {
+          try {
+            await resetThresholds();
+            fillThresholds();
+            paintRules();
+            toast('Đã khôi phục mặc định', 'sky');
+          } catch (err) { fail(err, 'Không lưu được ngưỡng'); }
+        });
       }
       if (b.dataset.act === 'reload') await busy(b, () => refreshHomeData());
     });
@@ -157,9 +161,14 @@ export const settingsPage = {
         if (vals.HUMIDITY_MIN >= vals.HUMIDITY_MAX) return toast('Độ ẩm tối thiểu phải nhỏ hơn tối đa', 'rose');
         if (vals.HUMIDITY_MIN < 0 || vals.HUMIDITY_MAX > 100) return toast('Độ ẩm phải trong khoảng 0–100%', 'rose');
         if (vals.LIGHT_MIN < 0) return toast('Ánh sáng tối thiểu không được âm', 'rose');
-        applyThresholds(vals);
-        paintRules();
-        toast('Đã lưu ngưỡng', 'emerald');
+        if (!hasHome) return toast('Chưa chọn nhà', 'rose');
+        await busy(btn, async () => {
+          try {
+            await applyThresholds(vals);
+            paintRules();
+            toast('Đã lưu ngưỡng', 'emerald');
+          } catch (err) { fail(err, 'Không lưu được ngưỡng'); }
+        });
       } else if (f.id === 'add-sensor') {
         if (!v.deviceId) return toast('Cần chọn thiết bị — hãy thêm thiết bị trước', 'rose');
         await busy(btn, async () => {
@@ -184,10 +193,13 @@ export const settingsPage = {
       }
     });
 
+    const fillThresholds = () => FIELDS.forEach(([k]) => { const el = $(`[name=${k}]`); if (el && document.activeElement !== el) el.value = THRESHOLDS[k]; });
+
     paintRules();
     paintSocket();
     paintSensorBox();
     const offs = [
+      on('settings', () => { fillThresholds(); paintRules(); }),
       on('socket', paintSocket),
       on('sensor', paintSensorTable),
       onChange(['sensors', 'devices', 'loading'], () => JSON.stringify([state.sensors.map((s) => [s.id, s.dataType, s.unit]), state.devices.map((d) => [d.id, d.name]), state.errors.sensors]), () => {

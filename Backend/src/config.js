@@ -21,7 +21,8 @@ const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
   jwtSecret: process.env.JWT_SECRET,
-  iotApiKey: process.env.IOT_API_KEY || 'default_iot_key',
+  // Không đặt IOT_API_KEY -> tắt hẳn đường xác thực bằng x-iot-key (không dùng khoá mặc định đoán được)
+  iotApiKey: process.env.IOT_API_KEY?.trim() || null,
   // Số giây cửa tự khoá lại sau khi mở (PIN / FaceAI / từ xa). 0 = tắt. Mặc định 10.
   doorAutoLockSeconds: (() => {
     const n = parseInt(process.env.DOOR_AUTO_LOCK_SECONDS ?? '', 10);
@@ -48,7 +49,19 @@ const config = {
     brokerUrl: process.env.MQTT_BROKER_URL || 'mqtt://io.adafruit.com:1883',
     username: process.env.MQTT_USERNAME.trim(),
     key: process.env.MQTT_KEY.trim(),
+    // Nhà đang gắn phần cứng thật (Yolo:Bit + Gateway) dùng tài khoản Adafruit này.
+    // Để trống -> lấy nhà có Home_ID nhỏ nhất. Nhà khác chỉ chạy mô phỏng (không gửi/nhận MQTT).
+    homeId: parseInt(process.env.MQTT_HOME_ID ?? '', 10) || null,
+    publishTimeoutMs: 5000,
+  },
+  automation: {
+    freshDataMs: 10 * 60 * 1000,   // chỉ tự động hoá theo số liệu mới hơn 10 phút
+    retryAfterMs: 60 * 1000,       // gửi lệnh tự động lỗi -> chờ 60s mới thử lại thiết bị đó
   },
 };
+
+if (!config.iotApiKey) {
+  console.warn('[CONFIG] Chưa đặt IOT_API_KEY: Gateway/camera không thể gọi API bằng header x-iot-key.');
+}
 
 module.exports = config;

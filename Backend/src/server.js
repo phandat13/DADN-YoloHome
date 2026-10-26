@@ -7,6 +7,7 @@ const config = require('./config');
 const { pool } = require('./db');
 const { initMQTT } = require('./services/mqttService');
 const { resumeAutoLocks } = require('./services/doorAutoLock');
+const automation = require('./services/automation');
 
 // 1. Khởi tạo HTTP server bọc Express App
 const server = http.createServer(app);
@@ -84,6 +85,9 @@ try {
 } catch (err) {
   console.error('[MQTT] Khởi động MQTT thất bại:', err);
 }
+
+// Cảnh báo ngưỡng + tự động hoá chạy trên server mỗi khi có số liệu cảm biến mới
+automation.start();
 
 // 6. Khởi chạy Server
 const PORT = config.port || 3000;

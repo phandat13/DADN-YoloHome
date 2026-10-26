@@ -6,10 +6,13 @@ const auth = require('../middlewares/auth');
 const checkPermission = require('../middlewares/permission');
 const asyncHandler = require('../middlewares/asyncHandler');
 const validate = require('../middlewares/validate');
-const { pool, callProc } = require('../db');
-const { publishCommand } = require('../services/mqttService');
+const { pool } = require('../db');
+const { sendDeviceCommand, loadDevice } = require('../services/deviceControl');
+const { disableAutoOnManual } = require('../services/automation');
 
 const { resolveValidFeedKey, isFanDevice } = require('../utils/feeds');
+
+const LIGHT_DEFAULT_COLOR = '#FFFFFF';
 
 // ==========================================
 // 1. ZOD SCHEMAS
@@ -60,21 +63,22 @@ const updateDeviceSchema = z.object({
 
 const deviceParamSchema = z.object({ params: deviceIdParams });
 
-// Device_Command.Source_Type là ENUM('USER','VOICE_COMMAND','SCHEDULE','SYSTEM'); Frontend có thể gửi 'APP', 'web'...
-const normalizeSourceType = (value) => {
-  const v = String(value || '').toUpperCase();
-  if (v === 'VOICE' || v === 'VOICE_COMMAND') return 'VOICE_COMMAND';
-  if (v === 'SCHEDULE' || v === 'AUTO') return 'SCHEDULE';
-  if (v === 'SYSTEM') return 'SYSTEM';
-  return 'USER';
-};
-
-const extractOutValue = (outResult, paramName) => {
-  if (!outResult) return undefined;
-  const target = outResult.outParams || (Array.isArray(outResult) ? outResult[0] : outResult);
-  if (!target || typeof target !== 'object') return undefined;
-  return target[paramName] ?? target[`@${paramName}`];
-};
+// Lệnh điều khiển: { action?, state?, speed?, color?, payload?: {...} } (payload giữ tương thích bản cũ)
+const commandSchema = z.object({
+  params: deviceIdParams,
+  body: z.object({
+    action: z.string().trim().max(30).optional(),
+    actionName: z.string().trim().max(30).optional(),
+    command: z.string().trim().max(30).optional(),
+    state: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    status: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    speed: z.union([z.number(), z.string()]).optional(),
+    value: z.union([z.number(), z.string(), z.boolean()]).optional(),
+    color: z.string().trim().optional(),
+    payload: z.record(z.string(), z.any()).optional().nullable(),
+    sourceType: z.string().optional(),
+  }),
+});
 
 // ==========================================
 // 3. ROUTES
@@ -103,6 +107,7 @@ router.get(
         d.Type_Code AS typeCode,
         d.Controller_ID AS controllerId,
         d.Feed_Key AS feedKey,
+        d.Color AS color,
         dt.Type_Name AS typeName,
         dt.Type_Group AS typeGroup,
         dt.Manufacturer AS manufacturer
@@ -154,7 +159,7 @@ router.post(
       });
     }
 
-    // Gán chính xác feed thuộc 8 feed hợp lệ
+    // Gán chính xác 1 trong các feed hợp lệ (utils/feeds.js)
     const finalFeedKey = resolveValidFeedKey(userFeedKey, typeCode, deviceName);
 
     const [result] = await pool.query(
@@ -167,8 +172,9 @@ router.post(
         Home_ID,
         Type_Code,
         Controller_ID,
-        Feed_Key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        Feed_Key,
+        Color
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         deviceName,
         hardwareId || null,
@@ -179,6 +185,7 @@ router.post(
         typeCode,
         controllerId || null,
         finalFeedKey,
+        finalFeedKey === 'device-light' ? LIGHT_DEFAULT_COLOR : null,
       ]
     );
 
@@ -278,139 +285,68 @@ router.delete(
 
 /**
  * @route   POST /api/homes/:homeId/devices/:deviceId/commands
- * @desc    Gửi lệnh tới 1 trong 8 feed chuẩn
+ * @desc    Bật/tắt đèn, còi; đặt tốc độ quạt (0–100); đổi màu đèn (#RRGGBB)
+ *          Phản hồi sau khi broker MQTT xác nhận đã nhận lệnh (hoặc ngay lập tức với nhà mô phỏng).
  */
 router.post(
   '/:deviceId/commands',
   auth,
-  validate(deviceParamSchema),
+  validate(commandSchema),
   checkPermission('DEVICE_CONTROL'),
   asyncHandler(async (req, res) => {
-    const userId = req.user.User_ID;
     const homeId = parseInt(req.params.homeId, 10);
     const deviceId = parseInt(req.params.deviceId, 10);
     const body = req.body || {};
+    const inner = body.payload || {};
 
-    const innerPayload = (typeof body.payload === 'object' && body.payload !== null) ? body.payload : {};
-    let action = body.action || body.actionName || body.command || innerPayload.action;
-    let state = body.state !== undefined ? body.state : (body.status !== undefined ? body.status : innerPayload.state);
-    let speed = body.speed !== undefined 
-      ? body.speed 
-      : (innerPayload.speed !== undefined 
-          ? innerPayload.speed 
-          : (typeof body.value === 'number' ? body.value : undefined));
-    let value = body.value;
-    const sourceType = normalizeSourceType(body.sourceType);
-
-    if (!action) {
-      if (state !== undefined) {
-        action = (String(state).toUpperCase() === 'ON' || state === 1 || state === true) ? 'TURN_ON' : 'TURN_OFF';
-      } else if (speed !== undefined) {
-        action = 'SET_SPEED';
-      } else if (value !== undefined) {
-        action = (value === 1 || value === true || String(value).toUpperCase() === 'ON') ? 'TURN_ON' : 'TURN_OFF';
-      } else {
-        action = 'CONTROL';
-      }
-    }
-
-    // 1. Đọc thông tin thiết bị từ DB
-    const [devRows] = await pool.query(
-      'SELECT Device_ID, Device_Name, Feed_Key, Type_Code, Connection_State FROM Device WHERE Device_ID = ? AND Home_ID = ?',
-      [deviceId, homeId]
-    );
-
-    if (devRows.length === 0) {
+    const device = await loadDevice(homeId, deviceId);
+    if (!device) {
       return res.status(404).json({ success: false, message: 'Thiết bị không tồn tại trong ngôi nhà này' });
     }
 
-    const device = devRows[0];
-
-    // 2. Đảm bảo feedKey thuộc đúng 8 feed chuẩn
-    const feedKey = resolveValidFeedKey(device.Feed_Key, device.Type_Code, device.Device_Name);
-    const isFan = isFanDevice(device, feedKey);
-
-    // 3. Chuẩn hóa payload
-    let newWorkingState = null;
-    let mqttPayload = { action };
-    if (typeof body.payload === 'object' && body.payload !== null) {
-      mqttPayload = { ...mqttPayload, ...body.payload };
+    const input = {
+      action: body.action ?? body.actionName ?? body.command ?? inner.action,
+      state: body.state ?? body.status ?? inner.state,
+      speed: body.speed ?? inner.speed,
+      color: body.color ?? inner.color,
+    };
+    // Bản cũ gửi { value }: số -> tốc độ quạt, còn lại -> bật/tắt
+    if (body.value !== undefined && input.speed === undefined && input.state === undefined) {
+      if (typeof body.value === 'number' && isFanDevice(device)) input.speed = body.value;
+      else input.state = body.value;
     }
 
-    const upperAction = String(action).toUpperCase();
-    if (upperAction === 'TURN_ON' || upperAction === 'ON') {
-      newWorkingState = 'on';
-      mqttPayload.state = 'ON';
-    } else if (upperAction === 'TURN_OFF' || upperAction === 'OFF') {
-      newWorkingState = 'off';
-      mqttPayload.state = 'OFF';
-      // CHỈ GÁN SPEED = 0 NẾU LÀ QUẠT, KHÔNG GÁN CHO ĐÈN
-      if (isFan) {
-        mqttPayload.speed = 0;
-      } else {
-        delete mqttPayload.speed;
-      }
-    } else if (upperAction === 'SET_SPEED' || speed !== undefined) {
-      const finalSpeed = Number(speed ?? 0);
-      newWorkingState = String(finalSpeed);
-      mqttPayload.speed = finalSpeed;
-      mqttPayload.state = finalSpeed > 0 ? 'ON' : 'OFF';
-    }
-
-    // 4. Phát lệnh sang MQTT broker
-    const isPublished = publishCommand(feedKey, mqttPayload);
-    if (!isPublished) {
-      return res.status(503).json({ success: false, message: 'Không thể kết nối hoặc gửi lệnh tới MQTT broker' });
-    }
-
-    // 5. Phản hồi HTTP 200 ngay tức thì (Zero-delay UI)
-    res.status(200).json({
-      success: true,
-      message: 'Gửi lệnh điều khiển thiết bị thành công',
-      data: { deviceId, action, workingState: newWorkingState, feedKey },
+    const result = await sendDeviceCommand({
+      io: req.app.get('io'), homeId, device, input, userId: req.user.User_ID, sourceType: 'USER',
     });
 
-    // 6. Ghi log và đồng bộ dữ liệu chạy ngầm (Non-blocking)
-    (async () => {
-      try {
-        const commandDataString = JSON.stringify(mqttPayload);
+    if (!result.ok) {
+      return res.status(503).json({
+        success: false,
+        message: 'Không gửi được lệnh tới Adafruit IO (MQTT chưa kết nối hoặc không phản hồi). Lệnh đã được ghi là FAILED.',
+        data: { commandId: result.commandId },
+      });
+    }
 
-        // Ghi vào bảng Device_Command
-        try {
-          await callProc(
-            'sp_send_device_command',
-            [deviceId, userId, action, sourceType, commandDataString],
-            ['p_command_id']
-          );
-        } catch {
-          await pool.query(
-            `INSERT INTO Device_Command (Source_ID, Source_Type, Data_attached, Excute_Time, Excute_State, Device_ID)
-             VALUES (?, ?, ?, NOW(), 'SUCCESS', ?)`,
-            [userId, sourceType, commandDataString, deviceId]
-          );
-        }
+    // Điều khiển tay -> tắt chế độ tự động để quy tắc tự động không bật/tắt ngược lại ngay sau đó
+    const autoModeDisabled = await disableAutoOnManual(req.app.get('io'), homeId);
 
-        // Cập nhật trạng thái hiển thị cho bảng Device
-        if (newWorkingState !== null) {
-          await pool.query(
-            'UPDATE Device SET Available_working_State = ? WHERE Device_ID = ?',
-            [newWorkingState, deviceId]
-          );
-
-          // Bắn Socket.IO thông báo cho các tab khác
-          const io = req.app.get('io');
-          if (io) {
-            io.to(`home_${homeId}`).emit('device_state_updated', {
-              homeId,
-              deviceId,
-              state: newWorkingState,
-            });
-          }
-        }
-      } catch (bgErr) {
-        console.error('[BACKGROUND_DEVICE_UPDATE_ERROR]:', bgErr);
-      }
-    })();
+    res.status(200).json({
+      success: true,
+      message: result.simulated
+        ? 'Đã cập nhật trạng thái (nhà này không gắn phần cứng nên không gửi MQTT)'
+        : 'Gửi lệnh điều khiển thiết bị thành công',
+      data: {
+        deviceId,
+        commandId: result.commandId,
+        action: result.cmd.action,
+        workingState: result.workingState,
+        color: result.color,
+        feedKey: result.cmd.feedKey,
+        simulated: result.simulated,
+        autoModeDisabled,
+      },
+    });
   })
 );
 

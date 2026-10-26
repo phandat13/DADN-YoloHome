@@ -1,3 +1,4 @@
+SET NAMES utf8mb4;
 USE smart_home;
 
 SET GLOBAL event_scheduler = ON;

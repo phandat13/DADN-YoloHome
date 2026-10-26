@@ -1,295 +1,323 @@
-# YoloHome - Smart Home IoT & AI Backend System
 
-Hệ thống máy chủ điều khiển và quản lý nhà thông minh **YoloHome**, tích hợp phân hệ trí tuệ nhân tạo (Nhận diện khuôn mặt & Giọng nói tiếng Việt) và giao thức truyền thông IoT thời gian thực.
+# YoloHome - Smart Home IoT & AI
+
+Hệ thống nhà thông minh **YoloHome** theo giáo trình *AI và IoT cho nhà thông minh* (OhStem). Gồm 4 phần:
+
+| Thư mục | Vai trò |
+|---|---|
+| `Database/` | MySQL: bảng, stored procedure, trigger, event, dữ liệu demo |
+| `Backend/` | Node.js (Express + Socket.IO): REST API, phân quyền, MQTT Adafruit IO, tự động hoá, giọng nói, FaceAI |
+| `Frontend/` | Web dashboard (HTML + ES Modules) |
+| `Gateway/` | Python: cầu nối Serial ⇄ MQTT giữa mạch Yolo:Bit và Adafruit IO ([giao thức](Gateway/PROTOCOL.md)) |
+
+```
+Yolo:Bit ⇄ Serial ⇄ Gateway ⇄ MQTT (Adafruit IO) ⇄ Backend ⇄ REST + Socket.IO ⇄ Frontend
+                                                      ⇅
+                                                    MySQL
+```
 
 ---
 
 ## Mục lục
-- [Giới thiệu hệ thống](#-giới-thiệu-hệ-thống)
-- [Kiến trúc & Công nghệ](#-kiến-trúc--công-nghệ)
-- [Cài đặt & Khởi chạy](#-cài-đặt--khởi-chạy)
-- [Danh sách API Endpoints](#-danh-sách-api-endpoints)
-  - [1. Phân hệ Xác thực](#1-phân-hệ-xác-thực-auth)
-  - [2. Quản lý Nhà](#2-quản-lý-nhà-home)
-  - [3. Quản lý Thành viên](#3-quản-lý-thành-viên-member)
-  - [4. Quản lý Thiết bị](#4-quản-lý-thiết-bị-device)
-  - [5. Cửa thông minh](#5-cửa-thông-minh-smart-door)
-  - [6. Phân hệ Trí tuệ Nhân tạo](#6-phân-hệ-trí-tuệ-nhân-tạo-ai)
-  - [7. Cảm biến & IoT](#7-cảm-biến--iot-iot-telemetry)
-  - [8. Nhật ký & Thông báo](#8-nhật-ký--thông-báo-logs--notifications)
-- [Hướng dẫn kiểm thử qua Thunder Client](#-hướng-dẫn-kiểm-thử-qua-thunder-client)
+- [Kiến trúc & Công nghệ](#kiến-trúc--công-nghệ)
+- [Cài đặt & Khởi chạy](#cài-đặt--khởi-chạy)
+- [Danh sách API Endpoints](#danh-sách-api-endpoints)
+- [Sự kiện Socket.IO](#sự-kiện-socketio)
+- [Hướng dẫn kiểm thử qua Thunder Client](#hướng-dẫn-kiểm-thử-bằng-thunder-client)
 
 ---
 
 ## Kiến trúc & Công nghệ
 
-* **Runtime:** Node.js (Express Framework)
-* **Cơ sở dữ liệu:** MySQL
-* **Giao thức truyền thông IoT:** MQTT (Adafruit IO)
-* **Bảo mật:** JWT (JSON Web Tokens), Bcrypt Password Hashing, Rate-limiting, RBAC Middleware
-* **Kiểm thực dữ liệu:** Custom Middleware Validation (validate.js)
+* **Runtime:** Node.js 18+ (Express 5, Socket.IO)
+* **Cơ sở dữ liệu:** MySQL 8 (MariaDB 10.6+ cũng chạy được)
+* **Giao thức truyền thông IoT:** MQTT qua Adafruit IO. Định dạng các feed xem trong [Gateway/PROTOCOL.md](Gateway/PROTOCOL.md).
+* **Bảo mật:** JWT, mật khẩu băm bằng bcrypt, PIN băm SHA-256 có muối, rate-limit, phân quyền RBAC (Owner / Member / Guest)
+* **Kiểm tra dữ liệu đầu vào:** Zod (`middlewares/validate.js`)
+* **Tự động hoá:** chạy trên server (`services/automation.js`) theo ngưỡng của từng nhà (bảng `Home_Setting`)
 
 ---
 
 ## Cài đặt & Khởi chạy
 
-### 1. Chuẩn bị Cơ sở dữ liệu (MySQL)
-Chạy script `init.sql` để khởi tạo database `smart_home` cùng toàn bộ bảng, stored procedures và triggers:
+### 1. Cơ sở dữ liệu (MySQL)
+
+Các file `.sql` dùng `SOURCE` với đường dẫn tương đối, nên **phải chạy từ trong thư mục `Database`**. Cần thêm `--default-character-set=utf8mb4` để tiếng Việt không bị lỗi font.
+
 ```bash
-mysql -u root -p < Database/init.sql
+cd Database
+mysql --default-character-set=utf8mb4 -u root -p < init.sql        # tạo lại DB smart_home (XOÁ dữ liệu cũ)
+mysql --default-character-set=utf8mb4 -u root -p < seed_demo.sql   # (tuỳ chọn) dữ liệu demo
 ```
 
-### 2. Thiết lập biến môi trường (`.env`)
+Dữ liệu demo gồm các tài khoản sau, mật khẩu đều là `123456`:
 
-Tạo file `.env` tại thư mục `Backend/` với các thông số cấu hình:
+- `owner@yolohome.local` (chủ nhà)
+- `member@yolohome.local` (thành viên)
+- `guest@yolohome.local` (khách)
 
-```env
-PORT=3000
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=your_mysql_password
-DB_NAME=smart_home
-DB_PORT=3306
+Ngoài ra có "Nhà Demo" với đèn RGB, quạt, còi, cụm cảm biến (nhiệt độ, độ ẩm, ánh sáng, PIR) kèm 24 giờ số liệu, và "Cửa chính" với PIN `1234`.
 
-JWT_SECRET=your_jwt_secret_key
-MQTT_BROKER_URL=mqtt://broker.hivemq.com:1883
-```
+> Dùng MySQL Workbench: mở và chạy lần lượt `smart_home.sql`, `functions.sql`, `procedures.sql`, `triggers.sql`, `roles_permissions.sql`, `events.sql`, rồi `seed_demo.sql`.
 
----
-
-## 3. Cài đặt thư viện & Khởi động Server
-
-Di chuyển vào thư mục Backend:
+### 2. Backend
 
 ```bash
 cd Backend
-```
-
-### Cài đặt thư viện
-
-```bash
+cp .env.example .env      # rồi điền giá trị thật (xem chú thích trong file)
 npm install
+npm run dev               # tự reload khi sửa code; chạy thật: npm start
 ```
 
-### Chạy server ở chế độ phát triển
+Các biến **bắt buộc** trong `.env`:
 
-Server sẽ tự động reload khi source code thay đổi:
+- `JWT_SECRET`
+- `DB_PASSWORD`
+- `MQTT_USERNAME`
+- `MQTT_KEY`
+
+Các biến quan trọng khác:
+
+| Biến | Ý nghĩa |
+|---|---|
+| `IOT_API_KEY` | Khoá cho Gateway, camera hoặc bàn phím gọi API bằng header `x-iot-key`. Để trống thì tắt. |
+| `MQTT_HOME_ID` | Nhà (Home_ID) gắn với phần cứng thật. Để trống thì lấy nhà có ID nhỏ nhất. Các nhà khác chạy **mô phỏng**: không gửi lệnh lên MQTT và không nhận số liệu MQTT. |
+| `NODE_ENV` | `development` thì lỗi API trả kèm stack trace. Mặc định không trả. |
+| `CORS_ORIGIN` | Danh sách origin của Frontend, cách nhau bằng dấu phẩy. |
+| `DOOR_AUTO_LOCK_SECONDS` | Số giây cửa tự khoá lại sau khi mở. Mặc định 10, đặt 0 để tắt. |
+
+Server chạy tại `http://localhost:3000` (kiểm tra: `GET /health`).
+
+### 3. Frontend
 
 ```bash
-npm run dev
+cd Frontend
+python3 -m http.server 8000      # mở http://localhost:8000
 ```
 
-### Chạy production
+### 4. Gateway (khi có mạch Yolo:Bit)
 
 ```bash
-npm start
+cd Gateway
+python -m venv .venv && .venv/Scripts/activate      # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env             # điền ADAFRUIT_AIO_USERNAME / ADAFRUIT_AIO_KEY, SERIAL_PORT
+python main.py                   # chưa có mạch: đặt SIMULATE=1 trong .env để gửi số liệu ngẫu nhiên
 ```
 
-Server mặc định chạy tại:
+Tạo đủ 10 feed trên Adafruit IO theo [Gateway/PROTOCOL.md](Gateway/PROTOCOL.md).
 
-```text
-http://localhost:3000
-```
+> ⚠️ **Không commit file `.env` hay khoá Adafruit.** Khoá cũ đã từng bị đẩy lên repo public, nên phải tạo khoá mới trên Adafruit IO và đổi `JWT_SECRET` / `IOT_API_KEY`.
+
+---
 
 # Danh sách API Endpoints
+
+Mọi API (trừ đăng ký / đăng nhập) cần header `Authorization: Bearer <token>`, trừ khi có ghi chú khác. Owner luôn có toàn quyền trong nhà của mình.
 
 ## 1. Phân hệ Xác thực (Auth)
 
 | Phương thức | Endpoint | Yêu cầu Auth | Mô tả |
 |---|---|---|---|
-| `POST` | `/api/auth/register` | ❌ | Đăng ký tài khoản mới (`email`, `password`, `name`, `displayName`). Mật khẩu được băm bằng bcrypt và lưu thông qua `sp_register_user`. |
-| `POST` | `/api/auth/login` | ❌ | Đăng nhập bằng `email` và `password`. Tài khoản phải ở trạng thái `active`. Trả về JWT Token có hạn sử dụng 7 ngày. |
-| `GET` | `/api/auth/me` | ✅ | Lấy thông tin chi tiết của người dùng đang đăng nhập. |
-
----
+| `POST` | `/api/auth/register` | ❌ | Đăng ký tài khoản mới (`email`, `password`, `name`, `displayName`). Mật khẩu được băm bằng bcrypt. |
+| `POST` | `/api/auth/login` | ❌ | Đăng nhập bằng `email` và `password`. Trả về JWT có hạn 7 ngày. |
+| `GET` | `/api/auth/me` | ✅ | Thông tin người dùng đang đăng nhập. |
 
 ## 2. Quản lý Nhà (Home)
 
 | Phương thức | Endpoint | Quyền / Ghi chú | Mô tả |
 |---|---|---|---|
-| `POST` | `/api/homes` | Thành viên | Tạo nhà mới (`homeName`, `address`). Người tạo được tự động gán quyền **Owner**. |
-| `GET` | `/api/homes` | Thành viên | Xem danh sách các ngôi nhà mà người dùng đang tham gia và còn hiệu lực. |
-| `GET` | `/api/homes/:homeId` | `fn_is_home_member` | Lấy thông tin chi tiết của nhà. |
-| `PUT` | `/api/homes/:homeId` | `HOME_UPDATE` | Cập nhật thông tin nhà (`homeName`, `address`, `state`). |
-| `DELETE` | `/api/homes/:homeId` | Owner | Xóa nhà. Chỉ áp dụng cho chủ nhà. |
+| `POST` | `/api/homes` | Đã đăng nhập | Tạo nhà mới (`homeName`, `address`). Người tạo là **Owner**. |
+| `GET` | `/api/homes` | Đã đăng nhập | Danh sách nhà đang tham gia và còn hiệu lực. |
+| `GET` | `/api/homes/:homeId` | Thành viên | Chi tiết nhà. |
+| `PUT` | `/api/homes/:homeId` | `HOME_UPDATE` | Cập nhật `homeName`, `address`, `state`. |
+| `DELETE` | `/api/homes/:homeId` | Owner | Xoá nhà. |
 
----
-
-## 3. Quản lý Thành viên (Member)
+## 3. Cài đặt ngưỡng & chế độ tự động
 
 | Phương thức | Endpoint | Quyền hạn | Mô tả |
 |---|---|---|---|
-| `GET` | `/api/homes/:homeId/members` | Thành viên nhà | Xem danh sách thành viên trong nhà. |
-| `POST` | `/api/homes/:homeId/members` | `MEMBER_MANAGE` | Thêm thành viên mới (`email`, `roleName`: `Member` / `Guest`, `expired`). |
-| `PUT` | `/api/homes/:homeId/members/:userId` | `MEMBER_MANAGE` | Cập nhật vai trò hoặc gia hạn thời gian truy cập của thành viên. |
-| `DELETE` | `/api/homes/:homeId/members/:userId` | `MEMBER_MANAGE` | Xóa thành viên khỏi nhà. |
+| `GET` | `/api/homes/:homeId/settings` | Thành viên | `tempMax`, `humidityMin`, `humidityMax`, `lightMin`, `autoMode` và `alerts` (cảnh báo đang hoạt động). |
+| `PUT` | `/api/homes/:homeId/settings` | `DEVICE_MANAGE` | Cập nhật 4 ngưỡng. Điều kiện `humidityMin < humidityMax`. |
+| `PUT` | `/api/homes/:homeId/settings/mode` | `DEVICE_CONTROL` | `{ "autoMode": true \| false }` |
 
----
+Ở chế độ tự động, server thực hiện các quy tắc sau:
 
-## 4. Quản lý Thiết bị (Device)
+- Nhiệt độ vượt `tempMax`: cảnh báo, quạt chạy 100% và bật còi.
+- PIR phát hiện có người hoặc ánh sáng dưới `lightMin`: bật đèn.
 
-| Phương thức | Endpoint | Yêu cầu Auth | Mô tả |
-|---|---|---|---|
-| `GET` | `/api/homes/:homeId/devices` | ✅ | Xem danh sách thiết bị trong nhà. |
-| `POST` | `/api/homes/:homeId/devices` | ✅ | Tạo thiết bị mới (`deviceName`, `typeCode`). |
-| `PATCH` | `/api/homes/:homeId/devices/:deviceId` | ✅ | Cập nhật `deviceName`, `connectionState`, `availableWorkingState`, `controllerId`. |
-| `DELETE` | `/api/homes/:homeId/devices/:deviceId` | ✅ | Xóa thiết bị khỏi hệ thống. |
-| `POST` | `/api/homes/:homeId/devices/:deviceId/commands` | ✅ | Gửi lệnh điều khiển (`TURN_ON`, `TURN_OFF`, ...). Lệnh được ghi log vào `Device_Command` và phát qua MQTT. |
+Mỗi cảnh báo mới tạo một thông báo cho chủ nhà và một câu trợ lý gửi xuống LCD. Khi người dùng điều khiển tay (trên web hoặc bằng giọng nói), nhà chuyển sang thủ công.
 
----
-
-## 5. Cửa thông minh (Smart Door)
+## 4. Quản lý Thành viên (Member)
 
 | Phương thức | Endpoint | Quyền hạn | Mô tả |
 |---|---|---|---|
-| `POST` | `/api/homes/:homeId/doors` | `DEVICE_MANAGE` | Tạo cửa thông minh mới. |
-| `GET` | `/api/homes/:homeId/doors` | `DEVICE_VIEW` | Lấy danh sách cửa thông minh trong nhà. |
-| `POST` | `/api/homes/:homeId/doors/:doorName/pins` | `DOOR_MANAGE` | Cấp mã PIN mới, độ dài từ 4–8 chữ số. |
-| `POST` | `/api/homes/:homeId/doors/:doorName/verify-pin` | Public | Xác thực mã PIN mở cửa. Trả về `429 (locked_out)` nếu nhập sai quá 5 lần trong 10 phút. |
-| `PUT` | `/api/homes/:homeId/doors/:doorName/change-pin` | `DOOR_MANAGE` | Đổi mã PIN mở cửa. |
-| `DELETE` | `/api/homes/:homeId/doors/:doorName/credentials/:credentialId` | `DOOR_MANAGE` | Thu hồi mã PIN. |
-| `POST` | `/api/homes/:homeId/doors/:doorName/unlock` | `DOOR_MANAGE` | Điều khiển đóng/mở cửa từ xa (`locked` / `unlocked`). |
-| `GET` | `/api/homes/:homeId/doors/:doorName/attempts` | `DOOR_MANAGE` | Tra cứu lịch sử các lần truy cập vào cửa. |
+| `GET` | `/api/homes/:homeId/members` | Thành viên | Danh sách thành viên. |
+| `POST` | `/api/homes/:homeId/members` | `MEMBER_MANAGE` | Thêm thành viên (`email`, `roleName`: `Member` / `Guest`, `expired`). Khách bắt buộc có hạn. |
+| `PUT` | `/api/homes/:homeId/members/:userId` | `MEMBER_MANAGE` | Đổi vai trò hoặc gia hạn. |
+| `DELETE` | `/api/homes/:homeId/members/:userId` | `MEMBER_MANAGE` | Xoá thành viên, đồng thời thu hồi PIN và vô hiệu FaceAI của người đó. |
 
----
-
-## 6. Phân hệ Trí tuệ Nhân tạo (AI)
+## 5. Quản lý Thiết bị (Device)
 
 | Phương thức | Endpoint | Quyền hạn | Mô tả |
 |---|---|---|---|
-| `POST` | `/api/homes/:homeId/ai/face-profiles` | `FACE_MANAGE` | Đăng ký Face Profile mới với vector đặc trưng `faceData`. |
-| `GET` | `/api/homes/:homeId/ai/face-profiles` | `FACE_MANAGE` | Xem danh sách Face Profile đã đăng ký. |
-| `PUT` | `/api/homes/:homeId/ai/face-profiles/:profileId` | `FACE_MANAGE` | Cập nhật hạn sử dụng của Face Profile. |
-| `DELETE` | `/api/homes/:homeId/ai/face-profiles/:profileId` | `FACE_MANAGE` | Xóa Face Profile. |
-| `POST` | `/api/homes/:homeId/ai/doors/:doorName/face-recognition` | Public | Nhận diện khuôn mặt để mở cửa. Tính khoảng cách Euclidean; nếu `d < 0.6`, hệ thống tự động kích hoạt MQTT để mở chốt cửa. |
-| `POST` | `/api/homes/:homeId/ai/voice-commands` | `VOICE_USE` | Xử lý giọng nói tiếng Việt (`commandDetail`). Tự bóc tách từ khóa `"bật/mở"` và `"tắt/đóng"` rồi gửi lệnh điều khiển. |
+| `GET` | `/api/homes/:homeId/devices` | `DEVICE_VIEW` | Danh sách thiết bị, gồm `availableWorkingState` và `color` (màu đèn). |
+| `POST` | `/api/homes/:homeId/devices` | `DEVICE_MANAGE` | Tạo thiết bị (`deviceName`, `typeCode`: `LIGHT` / `FAN` / `BUZZER` / `SENSOR`). |
+| `PATCH` | `/api/homes/:homeId/devices/:deviceId` | `DEVICE_MANAGE` | Cập nhật `deviceName`, `connectionState`, `availableWorkingState`, `controllerId`, `feedKey`. |
+| `DELETE` | `/api/homes/:homeId/devices/:deviceId` | `DEVICE_MANAGE` | Xoá thiết bị. |
+| `POST` | `/api/homes/:homeId/devices/:deviceId/commands` | `DEVICE_CONTROL` | Gửi lệnh điều khiển (body ở bảng dưới). |
 
-### Face Recognition
+Body của lệnh điều khiển:
 
-Hệ thống sử dụng vector đặc trưng khuôn mặt (`faceData`) để thực hiện nhận diện.
+| Thiết bị | Body |
+|---|---|
+| Đèn | `{"action":"TURN_ON"}`, `{"action":"TURN_OFF"}` hoặc `{"action":"SET_COLOR","color":"#FF0000"}` |
+| Quạt | `{"action":"SET_SPEED","speed":0..100}` (số nguyên), `TURN_ON` hoặc `TURN_OFF` |
+| Còi | `TURN_ON` hoặc `TURN_OFF` |
 
-Nếu khoảng cách Euclidean thỏa mãn:
+Luồng xử lý một lệnh:
 
-```text
-d < 0.6
-```
+1. Ghi lệnh vào `Device_Command` với trạng thái `PENDING`.
+2. Gửi lên MQTT và chờ broker xác nhận.
+3. Đổi trạng thái lệnh thành `SUCCESS` hoặc `FAILED`; nếu `FAILED` thì trả HTTP 503.
+4. Trigger cập nhật `Device_State`.
 
-thì hệ thống xác nhận khuôn mặt hợp lệ và kích hoạt lệnh mở cửa thông qua MQTT.
+Nhà không gắn phần cứng (xem `MQTT_HOME_ID`) chỉ cập nhật trạng thái, không gửi MQTT. Khi đó phản hồi có `"simulated": true`.
 
----
+## 6. Cửa thông minh (Smart Door)
 
-## 7. Cảm biến & IoT (IoT Telemetry)
-
-| Phương thức | Endpoint | Yêu cầu Auth | Mô tả |
-|---|---|---|---|
-| `GET` | `/api/homes/:homeId/iot/sensors` | ✅ | Lấy danh sách các cảm biến đang hoạt động. |
-| `POST` | `/api/homes/:homeId/iot/sensors` | ✅ | Thêm cảm biến mới (`deviceId`, `dataType`, `unit`). |
-| `POST` | `/api/homes/:homeId/iot/sensors/:sensorId/telemetry` | ✅ | Thu thập dữ liệu đo đạc (`value`, `dataQuality` mặc định là `GOOD`). |
-| `GET` | `/api/homes/:homeId/iot/sensors/:sensorId/records` | ✅ | Xem lịch sử các bản ghi số liệu cảm biến. |
-
----
-
-## 8. Nhật ký & Thông báo (Logs & Notifications)
+Tên cửa chỉ cần **duy nhất trong một nhà**, nên nhà khác nhau đều đặt được "Cửa chính".
 
 | Phương thức | Endpoint | Quyền hạn | Mô tả |
 |---|---|---|---|
-| `GET` | `/api/homes/:homeId/activity-logs` | `LOG_VIEW_ALL` / `LOG_VIEW_OWN` | Tra cứu nhật ký hoạt động của hệ thống. |
-| `GET` | `/api/notifications` | ✅ | Lấy danh sách thông báo, hỗ trợ lọc theo `status`: `Unread`, `Read`. |
-| `PATCH` | `/api/notifications/:id/read` | ✅ | Đánh dấu thông báo đã đọc. |
+| `POST` | `/api/homes/:homeId/doors` | `DEVICE_MANAGE` | Tạo cửa (`doorName`). |
+| `GET` | `/api/homes/:homeId/doors` | `DEVICE_VIEW` hoặc `DOOR_UNLOCK` | Danh sách cửa, gồm `doorId`, trạng thái khoá và `autoLockAt`. |
+| `GET` | `/api/homes/:homeId/doors/:doorName/credentials` | `DOOR_MANAGE` | Danh sách PIN đã cấp. |
+| `POST` | `/api/homes/:homeId/doors/:doorName/pins` | `DOOR_MANAGE` | Cấp PIN 4–8 chữ số (`pin`, `targetUserId`, `validFrom`, `validTo`). |
+| `POST` | `/api/homes/:homeId/doors/:doorName/verify-pin` | `x-iot-key` **hoặc** `DOOR_UNLOCK` | Nhập PIN để mở cửa. Sai 5 lần trong 10 phút thì trả 429. |
+| `PUT` | `/api/homes/:homeId/doors/:doorName/change-pin` | `DOOR_MANAGE` | Đổi PIN (`currentPin`, `newPin`, `confirmPin`). |
+| `DELETE` | `/api/homes/:homeId/doors/:doorName/credentials/:credentialId` | `DOOR_MANAGE` | Thu hồi PIN. |
+| `POST` | `/api/homes/:homeId/doors/:doorName/unlock` | `DOOR_MANAGE` | Mở hoặc khoá cửa từ xa (`state`: `locked` / `unlocked`). |
+| `GET` | `/api/homes/:homeId/doors/:doorName/attempts` | `DOOR_MANAGE` | Lịch sử truy cập cửa. |
+
+## 7. Phân hệ Trí tuệ Nhân tạo (AI)
+
+| Phương thức | Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|
+| `POST` | `/api/homes/:homeId/ai/face-profiles` | `FACE_MANAGE` | Đăng ký khuôn mặt (`userId`, `faceData`: **đúng 128 số**, `validFrom`, `validTo`). |
+| `GET` | `/api/homes/:homeId/ai/face-profiles` | `FACE_MANAGE` | Danh sách hồ sơ khuôn mặt. |
+| `PUT` | `/api/homes/:homeId/ai/face-profiles/:profileId` | `FACE_MANAGE` | Đổi thời hạn. |
+| `DELETE` | `/api/homes/:homeId/ai/face-profiles/:profileId` | `FACE_MANAGE` | Xoá hồ sơ. |
+| `POST` | `/api/homes/:homeId/ai/doors/:doorName/face-recognition` | `x-iot-key` **hoặc** `DOOR_UNLOCK` | `inputFaceVector` gồm 128 số. Khoảng cách Euclid ≤ 0.55 (độ tin cậy ≥ 75%) thì mở cửa. |
+| `POST` | `/api/homes/:homeId/ai/voice-commands` | `VOICE_USE` | Lệnh giọng nói tiếng Việt (`commandDetail`). Phản hồi có trường `reply`, đồng thời gửi lên feed `assistant`. |
+
+Một số câu lệnh giọng nói được hiểu:
+
+- "Ơi bật đèn giúp mình", "tắt đèn phòng ngủ"
+- "Đổi đèn sang màu xanh dương"
+- "Bật quạt 50%", "quạt mức 2", "tắt quạt"
+- "Bật còi"
+
+Lệnh mở cửa bằng giọng nói bị từ chối vì lý do an toàn.
+
+## 8. Cảm biến & IoT (IoT Telemetry)
+
+| Phương thức | Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|
+| `GET` | `/api/homes/:homeId/iot/sensors` | `SENSOR_VIEW` | Danh sách cảm biến và giá trị mới nhất. |
+| `POST` | `/api/homes/:homeId/iot/sensors` | `DEVICE_MANAGE` | Thêm cảm biến (`deviceId`, `dataType`: `Temperature` / `Humidity` / `Light` / `Motion`, `unit`). |
+| `GET` | `/api/homes/:homeId/iot/sensors/:sensorId/records` | `SENSOR_VIEW` | Lịch sử đo (`from`, `to`, `limit` ≤ 5000). |
+| `POST` | `/api/homes/:homeId/iot/telemetry` | `x-iot-key` | Phần cứng gửi `{ sensorId, value, dataQuality }`. |
+| `POST` | `/api/homes/:homeId/iot/sensors/:sensorId/telemetry` | `x-iot-key` hoặc `DEVICE_MANAGE` | Gửi giá trị thử (`value`, `dataQuality`). |
+
+## 9. Nhật ký & Thông báo (Logs & Notifications)
+
+| Phương thức | Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|
+| `GET` | `/api/homes/:homeId/activity-logs` | `LOG_VIEW_ALL` / `LOG_VIEW_OWN` | Nhật ký hoạt động. |
+| `GET` | `/api/notifications` | ✅ | Thông báo của mình (lọc theo `status`: `Unread` / `Read`). |
+| `PATCH` | `/api/notifications/:id/read` | ✅ | Đánh dấu một thông báo là đã đọc. |
+| `PATCH` | `/api/notifications/read-all` | ✅ | Đánh dấu tất cả là đã đọc. |
+
+---
+
+# Sự kiện Socket.IO
+
+Kết nối với `auth: { token }`, sau đó gửi `join_home` kèm `homeId`. Server phát các sự kiện sau tới phòng `home_<id>`:
+
+| Sự kiện | Dữ liệu |
+|---|---|
+| `sensor_update` | `{ sensorId, type, value, unit, timestamp }` |
+| `device_state_updated` | `{ deviceId, state, color, source }` |
+| `door_state_updated` | `{ doorId, doorName, state, source, autoLockAt }` |
+| `alerts_updated` | `{ alerts: [{ key, level, message }] }` |
+| `settings_updated` | `{ settings }` |
+| `assistant_message` | `{ text, timestamp }` |
+
+---
 
 # Hướng dẫn kiểm thử bằng Thunder Client
 
-## 1. Đăng ký & Đăng nhập lấy Token
+## 1. Đăng nhập lấy Token
 
-### Bước 1: Đăng ký tài khoản
-
-Tạo request:
-
-```http
-POST http://localhost:3000/api/auth/register
-```
-
-Chọn **Body → JSON**:
-
-```json
-{
-  "name": "Admin",
-  "email": "admin@example.com",
-  "password": "password123"
-}
-```
-
-Gửi request và kiểm tra response.
-
-### Bước 2: Đăng nhập
-
-Tạo request:
+Nếu đã chạy `seed_demo.sql` thì dùng luôn tài khoản demo. Nếu chưa, gọi `POST /api/auth/register` trước với body `{ "name", "email", "password" }`.
 
 ```http
 POST http://localhost:3000/api/auth/login
 ```
 
-Body:
-
 ```json
 {
-  "email": "admin@example.com",
-  "password": "password123"
+  "email": "owner@yolohome.local",
+  "password": "123456"
 }
 ```
 
-Sao chép `token` trong JSON response.
+Sao chép giá trị `token` trong JSON phản hồi.
 
----
-
-## 2. Gắn Token vào Request bảo mật
-
-Đối với các API yêu cầu xác thực:
+## 2. Gắn Token vào các request cần xác thực
 
 1. Tạo request trong Thunder Client.
-2. Chọn tab **Auth**.
-3. Chọn loại xác thực **Bearer Token**.
-4. Dán JWT Token đã lấy được từ API `/api/auth/login`.
-5. Gửi request.
+2. Mở tab **Auth** và chọn loại **Bearer Token**.
+3. Dán token vừa lấy được rồi gửi, ví dụ `GET http://localhost:3000/api/homes`.
 
-Ví dụ:
+## 3. Điều khiển thiết bị
 
 ```http
-GET http://localhost:3000/api/homes
+POST http://localhost:3000/api/homes/1/devices/2/commands
 ```
 
----
+```json
+{ "action": "SET_SPEED", "speed": 60 }
+```
 
-## 3. Đăng ký Vector Khuôn mặt (Face AI)
-
-Tạo request:
+## 4. Đăng ký vector khuôn mặt (Face AI)
 
 ```http
 POST http://localhost:3000/api/homes/1/ai/face-profiles
 ```
 
-Chọn **Body → JSON**:
-
 ```json
 {
-  "userId": 1,
-  "faceData": [
-    0.123,
-    0.456,
-    0.789,
-    -0.321,
-    0.654
-  ],
-  "expired": "2026-12-31"
+  "userId": 2,
+  "faceData": [0.0123, -0.0456, "... đủ 128 số ..."],
+  "validTo": "2026-12-31"
 }
 ```
 
-Trong đó:
-
 | Field | Kiểu dữ liệu | Mô tả |
 |---|---|---|
-| `userId` | Integer | ID của người dùng được đăng ký khuôn mặt. |
-| `faceData` | Array\<Number\> | Vector đặc trưng khuôn mặt. |
-| `expired` | Date | Thời hạn sử dụng Face Profile. |
+| `userId` | Integer | Thành viên được đăng ký khuôn mặt. |
+| `faceData` | Array\<Number\> (128) | Descriptor của face-api.js (lấy ở trang "AI & Nhận diện"). |
+| `validFrom` / `validTo` | `YYYY-MM-DD` hoặc ISO | Thời hạn của hồ sơ (có thể bỏ trống). |
 
-> **Lưu ý:** `faceData` trong ví dụ chỉ là vector mẫu để kiểm thử API. Trong hệ thống thực tế, vector này cần được sinh ra từ mô hình nhận diện khuôn mặt.
+## 5. Mở cửa bằng PIN từ phần cứng
+
+```http
+POST http://localhost:3000/api/homes/1/doors/C%E1%BB%ADa%20ch%C3%ADnh/verify-pin
+x-iot-key: <IOT_API_KEY>
+```
+
+```json
+{ "pin": "1234" }
+```

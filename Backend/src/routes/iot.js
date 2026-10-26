@@ -155,7 +155,7 @@ router.get(
     const from = toMysqlDatetime(req.query.from, { dateOnly: 'start' });
     const to = toMysqlDatetime(req.query.to, { dateOnly: 'end' });
 
-    // Giới hạn trần tối đa 500 bản ghi để tránh cạn bộ nhớ
+    // Tối đa 5000 bản ghi mỗi lần (đủ cho biểu đồ 24 giờ) để tránh cạn bộ nhớ
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 5000);
 
     // Xác thực cảm biến thuộc nhà này

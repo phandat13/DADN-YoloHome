@@ -1,4 +1,5 @@
 const { pool } = require('../db');
+const bus = require('./bus');
 
 const QUALITIES = ['good', 'bad', 'uncertain'];
 
@@ -35,6 +36,8 @@ async function recordSensorValue({ sensorId, value, quality = 'good', io }) {
     timestamp: new Date().toISOString(),
   };
   if (io) io.to(`home_${sensor.Home_ID}`).emit('sensor_update', payload);
+  // Kiểm tra ngưỡng cảnh báo + tự động hoá ngay trên server (services/automation.js)
+  bus.emit('sensor_value', { io, homeId: sensor.Home_ID, type: sensor.Sensor_Type, value });
   return payload;
 }
 

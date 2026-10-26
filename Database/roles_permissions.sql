@@ -1,3 +1,4 @@
+SET NAMES utf8mb4;
 USE smart_home;
 
 -- 1. Vai trò
@@ -78,3 +79,5 @@ FROM Role r
 CROSS JOIN Permission p
 WHERE r.Role_Name = 'Owner';
 
+-- 6. Mỗi nhà có 1 dòng cài đặt ngưỡng / chế độ tự động
+INSERT IGNORE INTO Home_Setting (Home_ID) SELECT Home_ID FROM Home;
