@@ -6,6 +6,7 @@ const { publishCommand } = require('./mqttService');
 const { isHardwareHome, getHardwareHomeId } = require('./hardwareHome');
 const { resolveValidFeedKey, deviceKind } = require('../utils/feeds');
 const bus = require('./bus');
+const priority = require('./priority');
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -124,6 +125,16 @@ async function loadDevice(homeId, deviceId) {
   return rows[0] ?? null;
 }
 
+// Mọi thiết bị của 1 loại trong nhà (VD chế độ ngủ tắt TẤT CẢ đèn)
+async function findDevicesOfKind(homeId, kind) {
+  const [rows] = await pool.query(
+    `SELECT Device_ID, Device_Name, Feed_Key, Type_Code, Connection_State, Available_working_State, Color, Home_ID
+     FROM Device WHERE Home_ID = ? ORDER BY Device_ID`,
+    [homeId]
+  );
+  return rows.filter((d) => deviceKind(d.Type_Code, d.Device_Name) === kind);
+}
+
 // Thiết bị đầu tiên của 1 loại trong nhà (mô hình phần cứng giáo trình: 1 đèn, 1 quạt, 1 còi)
 async function findPrimaryDevice(homeId, kind) {
   const [rows] = await pool.query(
@@ -138,7 +149,28 @@ async function findPrimaryDevice(homeId, kind) {
  * Gửi lệnh tới thiết bị. Trả về { ok, commandId, workingState, color, published, simulated, cmd }.
  * ok = false khi không gửi được lên MQTT (lệnh được ghi FAILED).
  */
-async function sendDeviceCommand({ io, homeId, device, input, userId, sourceType = 'USER' }) {
+async function overrideMinutesOf(homeId) {
+  try {
+    const [rows] = await pool.query('SELECT Override_Minutes FROM Home_Setting WHERE Home_ID = ?', [homeId]);
+    const n = Number(rows[0]?.Override_Minutes);
+    return Number.isFinite(n) ? n : 30;
+  } catch {
+    return 30;   // DB cũ chưa có cột Override_Minutes
+  }
+}
+
+/**
+ * Gửi lệnh tới thiết bị (có kiểm tra độ ưu tiên, xem services/priority.js).
+ * holdSource: nguồn dùng để "giữ" thiết bị sau khi gửi (mặc định = sourceType; 'SLEEP' cho chế độ ngủ).
+ * level: độ ưu tiên ghi đè (VD hẹn giờ tạo bằng giọng nói = 4).
+ * Trả về thêm { skipped: true, blockedBy } khi bị nguồn ưu tiên cao hơn chặn (không ghi lệnh).
+ */
+async function sendDeviceCommand({ io, homeId, device, input, userId, sourceType = 'USER', holdSource, level }) {
+  const src = normalizeSourceType(sourceType);
+  const hold = holdSource ?? src;
+  const gate = priority.check(device.Device_ID, hold, level ?? priority.priorityOf(hold));
+  if (!gate.allowed) return { ok: false, skipped: true, blockedBy: gate.blockedBy };
+
   const cmd = buildCommand(device, input);
   const hardware = await isHardwareHome(homeId);
   const record = hardware ? cmd.record : { ...cmd.record, simulated: true };
@@ -169,7 +201,13 @@ async function sendDeviceCommand({ io, homeId, device, input, userId, sourceType
     Available_working_State: cmd.workingState ?? device.Available_working_State,
     Color: cmd.color ?? device.Color,
   };
-  emitDevice(io, homeId, updated, { source: normalizeSourceType(sourceType) });
+  emitDevice(io, homeId, updated, { source: src });
+
+  // Lệnh của người / hẹn giờ / chế độ ngủ -> giữ thiết bị, tự động hoá không đảo lại trong N phút
+  if (hold !== 'SYSTEM') {
+    priority.claim({ homeId, deviceId: device.Device_ID, source: hold, minutes: await overrideMinutesOf(homeId), priority: level });
+    priority.emit(io, homeId);
+  }
 
   return {
     ok, commandId, cmd, published, simulated: !hardware,
@@ -211,4 +249,4 @@ bus.on('device_feed', async ({ io, feedKey, data }) => {
   }
 });
 
-module.exports = { HttpError, buildCommand, sendDeviceCommand, loadDevice, findPrimaryDevice, normalizeSourceType };
+module.exports = { HttpError, buildCommand, sendDeviceCommand, loadDevice, findPrimaryDevice, findDevicesOfKind, normalizeSourceType };

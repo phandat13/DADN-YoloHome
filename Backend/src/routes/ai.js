@@ -12,8 +12,10 @@ const { iotKeyOrUser } = require('../middlewares/iotAuth');
 const { toMysqlDatetime, optionalDateSchema } = require('../utils/datetime');
 const { requireDoorInHome } = require('../utils/doors');
 const { parseVoice, resolveDevice } = require('../utils/voice');
-const { sendDeviceCommand, HttpError } = require('../services/deviceControl');
-const { disableAutoOnManual } = require('../services/automation');
+const { sendDeviceCommand, buildCommand, HttpError } = require('../services/deviceControl');
+const automation = require('../services/automation');
+const scheduler = require('../services/scheduler');
+const priority = require('../services/priority');
 const assistant = require('../services/assistant');
 
 // face-api.js (Frontend) sinh descriptor 128 chiều; vector khác độ dài sẽ không bao giờ so khớp được
@@ -390,6 +392,28 @@ router.post(
     const { commandDetail, language } = req.body;
 
     const parsed = parseVoice(commandDetail);
+
+    // Chế độ ngủ / thức dậy bằng giọng nói (ưu tiên giọng nói: đèn tắt và tự động hoá không bật lại)
+    if (parsed.intent === 'sleep' || parsed.intent === 'wake') {
+      const [vc] = await pool.query(
+        `INSERT INTO Voice_Command (Command_Detail, Working_State, Device, User_ID, Home_ID, Command_Data, \`Language\`)
+         VALUES (?, 'sent', NULL, ?, ?, ?, ?)`,
+        [commandDetail, userId, homeId, JSON.stringify({ action: parsed.intent === 'sleep' ? 'SLEEP_MODE' : 'WAKE_UP' }), language]
+      );
+      const { lights, until } = await automation.applySleepNow(io, homeId, parsed.intent === 'sleep' ? 'sleep' : 'awake',
+        { userId, source: 'VOICE_COMMAND' });
+      const reply = parsed.intent === 'sleep' ? 'Chuc ngu ngon! Da tat den' : 'Chao buoi sang!';
+      await assistant.say(io, homeId, reply).catch(() => false);
+      const hhmm = until ? new Date(until).toTimeString().slice(0, 5) : null;
+      const message = parsed.intent === 'sleep'
+        ? `Đã bật chế độ ngủ tới ${hhmm}: tắt ${lights.filter((l) => l.result === 'đã tắt').length} đèn, đèn sẽ không tự bật theo trời tối / chuyển động`
+        : `Đã tắt chế độ ngủ tới ${hhmm}: đèn chạy lại theo ánh sáng / chuyển động`;
+      return res.status(200).json({
+        success: true, message, reply: message,
+        data: { voiceId: vc.insertId, state: 'sent', commandDetail, intent: parsed.intent, lights, until },
+      });
+    }
+
     const [devices] = await pool.query(
       `SELECT Device_ID, Device_Name, Feed_Key, Type_Code, Connection_State, Available_working_State, Color, Home_ID
        FROM Device WHERE Home_ID = ? ORDER BY Device_ID`,
@@ -397,6 +421,7 @@ router.post(
     );
     const device = parsed.intent in INPUT ? resolveDevice(devices, parsed) : null;
     const commandData = device ? INPUT[parsed.intent](parsed) : {};
+    if (device && parsed.timer) commandData.runAt = parsed.timer.runAt.toISOString();
 
     // Ghi lịch sử Voice_Command (thiết bị không xác định -> 'unsupported', trigger tự tạo thông báo)
     const { outParams } = await callProc(
@@ -422,9 +447,38 @@ router.post(
         ? 'Tôi không hiểu: nhà chưa có thiết bị phù hợp hoặc câu lệnh thiếu "bật / tắt / %"'
         : 'Tôi không hiểu: hãy nói rõ thiết bị (đèn, quạt, còi) và hành động (bật, tắt, 50%, màu đỏ...)');
     }
+    if (parsed.timerMissing) {
+      return reject(400, 'Hen gio luc may gio?', 'Bạn muốn hẹn giờ lúc nào? VD: "tắt quạt sau 30 phút", "tắt đèn lúc 10 giờ tối"');
+    }
+
+    // Có thời gian -> tạo hẹn giờ (mức ưu tiên giọng nói), không điều khiển ngay
+    if (parsed.timer) {
+      try {
+        buildCommand(device, commandData);
+      } catch (err) {
+        if (err instanceof HttpError) return reject(err.status, err.message);
+        throw err;
+      }
+      const schedule = await scheduler.createSchedule(io, homeId, userId, {
+        deviceId: device.Device_ID, action: commandData.action, speed: commandData.speed, color: commandData.color,
+        repeat: false, runAt: parsed.timer.runAt, via: 'VOICE', note: commandDetail.slice(0, 100),
+      });
+      const at = parsed.timer.runAt;
+      const when = parsed.timer.minutes
+        ? `sau ${parsed.timer.minutes} phút (${at.toTimeString().slice(0, 5)})`
+        : `lúc ${at.toTimeString().slice(0, 5)}${at.toDateString() !== new Date().toDateString() ? ' ngày mai' : ''}`;
+      const reply = `Đã hẹn ${schedule.actionText.toLowerCase()} ${device.Device_Name} ${when}`;
+      await assistant.say(io, homeId, `Hen gio ${at.toTimeString().slice(0, 5)}`).catch(() => false);
+      return res.status(200).json({
+        success: true, message: reply, reply,
+        data: { voiceId, state: 'scheduled', commandDetail, intent: parsed.intent, deviceName: device.Device_Name,
+          targetDeviceId: device.Device_ID, commandData, schedule },
+      });
+    }
 
     let result;
     try {
+      // Giọng nói có độ ưu tiên cao nhất: giữ thiết bị, tự động hoá và hẹn giờ tạo trên web không đảo lại
       result = await sendDeviceCommand({ io, homeId, device, input: commandData, userId, sourceType: 'VOICE_COMMAND' });
     } catch (err) {
       if (err instanceof HttpError) return reject(err.status, err.message);
@@ -434,9 +488,9 @@ router.post(
       return reject(503, 'Không gửi được lệnh', 'Không gửi được lệnh tới Adafruit IO (MQTT chưa kết nối hoặc không phản hồi)');
     }
 
-    const autoModeDisabled = await disableAutoOnManual(io, homeId);
     const reply = REPLY[parsed.intent](device, parsed);
     await assistant.say(io, homeId, reply).catch(() => false);
+    const hold = priority.active(device.Device_ID);
 
     res.status(200).json({
       success: true,
@@ -453,7 +507,8 @@ router.post(
         workingState: result.workingState,
         color: result.color,
         simulated: result.simulated,
-        autoModeDisabled,
+        priorityUntil: hold ? new Date(hold.until).toISOString() : null,
+        autoModeDisabled: false,
       },
     });
   })

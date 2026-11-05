@@ -8,7 +8,7 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const validate = require('../middlewares/validate');
 const { pool } = require('../db');
 const { sendDeviceCommand, loadDevice } = require('../services/deviceControl');
-const { disableAutoOnManual } = require('../services/automation');
+const priority = require('../services/priority');
 
 const { resolveValidFeedKey, isFanDevice } = require('../utils/feeds');
 
@@ -328,8 +328,8 @@ router.post(
       });
     }
 
-    // Điều khiển tay -> tắt chế độ tự động để quy tắc tự động không bật/tắt ngược lại ngay sau đó
-    const autoModeDisabled = await disableAutoOnManual(req.app.get('io'), homeId);
+    // Điều khiển tay -> chỉ "giữ" thiết bị này N phút (services/priority.js), chế độ tự động vẫn chạy cho thiết bị khác
+    const hold = priority.active(deviceId);
 
     res.status(200).json({
       success: true,
@@ -344,7 +344,8 @@ router.post(
         color: result.color,
         feedKey: result.cmd.feedKey,
         simulated: result.simulated,
-        autoModeDisabled,
+        autoModeDisabled: false,
+        priorityUntil: hold ? new Date(hold.until).toISOString() : null,
       },
     });
   })

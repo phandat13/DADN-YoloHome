@@ -8,6 +8,8 @@ const { pool } = require('./db');
 const { initMQTT } = require('./services/mqttService');
 const { resumeAutoLocks } = require('./services/doorAutoLock');
 const automation = require('./services/automation');
+const scheduler = require('./services/scheduler');
+const priority = require('./services/priority');
 
 // 1. Khởi tạo HTTP server bọc Express App
 const server = http.createServer(app);
@@ -62,6 +64,7 @@ io.on('connection', (socket) => {
         const roomName = `home_${parsedHomeId}`;
         socket.join(roomName);
         socket.emit('joined_home', { homeId: parsedHomeId, room: roomName });
+        socket.emit('overrides_updated', { homeId: parsedHomeId, overrides: priority.list(parsedHomeId) });
       } else {
         socket.emit('error_message', 'Bạn không có quyền truy cập vào dữ liệu ngôi nhà này');
       }
@@ -86,8 +89,10 @@ try {
   console.error('[MQTT] Khởi động MQTT thất bại:', err);
 }
 
-// Cảnh báo ngưỡng + tự động hoá chạy trên server mỗi khi có số liệu cảm biến mới
-automation.start();
+// Cảnh báo ngưỡng + tự động hoá chạy trên server mỗi khi có số liệu cảm biến mới (và quét định kỳ 30s: giờ ngủ, hết ưu tiên)
+automation.start(io);
+// Hẹn giờ thiết bị (bảng Device_Schedule), quét mỗi 15s
+scheduler.start(io);
 
 // 6. Khởi chạy Server
 const PORT = config.port || 3000;

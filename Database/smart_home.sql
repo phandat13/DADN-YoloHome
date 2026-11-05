@@ -283,9 +283,46 @@ CREATE TABLE Home_Setting (
     Humidity_Max DOUBLE NOT NULL DEFAULT 70,
     Light_Min DOUBLE NOT NULL DEFAULT 200,
     Auto_Mode BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Chế độ ngủ: trong khung giờ này tự động hoá giữ đèn TẮT (không bật đèn theo trời tối / PIR)
+    Sleep_Enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    Sleep_Start TIME NOT NULL DEFAULT '22:30:00',
+    Sleep_End TIME NOT NULL DEFAULT '06:00:00',
+    -- Ra lệnh "đi ngủ" / "thức dậy" (giọng nói hoặc nút trên web): ghi đè khung giờ ngủ tới Sleep_Manual_Until
+    Sleep_Manual ENUM('NONE','SLEEP','AWAKE') NOT NULL DEFAULT 'NONE',
+    Sleep_Manual_Until DATETIME NULL,
+    -- Số phút lệnh của người (giọng nói / web / hẹn giờ) được ưu tiên hơn tự động hoá trên thiết bị đó
+    Override_Minutes INT NOT NULL DEFAULT 30,
     Updated_At DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_hs_home FOREIGN KEY (Home_ID)
         REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- Hẹn giờ thiết bị: chạy 1 lần (Run_At) hoặc lặp lại theo giờ trong ngày + các thứ trong tuần
+CREATE TABLE Device_Schedule (
+    Schedule_ID INT AUTO_INCREMENT PRIMARY KEY,
+    Home_ID INT NOT NULL,
+    Device_ID INT NOT NULL,
+    `Action` VARCHAR(20) NOT NULL,                 -- TURN_ON | TURN_OFF | SET_SPEED | SET_COLOR
+    Speed TINYINT UNSIGNED NULL,                   -- 0..100 khi SET_SPEED
+    Color CHAR(7) NULL,                            -- #RRGGBB khi SET_COLOR
+    Repeat_Type ENUM('ONCE','REPEAT') NOT NULL DEFAULT 'ONCE',
+    Time_Of_Day TIME NULL,                         -- giờ chạy khi REPEAT
+    Days_Mask TINYINT UNSIGNED NOT NULL DEFAULT 127, -- bit 0 = Chủ nhật ... bit 6 = Thứ bảy (127 = mọi ngày)
+    Next_Run_At DATETIME NULL,
+    Enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    Created_Via ENUM('WEB','VOICE') NOT NULL DEFAULT 'WEB',   -- hẹn bằng giọng nói được ưu tiên cao hơn
+    Note VARCHAR(100) NULL,
+    Last_Run_At DATETIME NULL,
+    Last_Result VARCHAR(20) NULL,                  -- SUCCESS | FAILED | SKIPPED | MISSED
+    Created_By INT NULL,
+    Created_At DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_schedule_due (Enabled, Next_Run_At),
+    CONSTRAINT fk_ds_home FOREIGN KEY (Home_ID)
+        REFERENCES Home(Home_ID) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_ds_device FOREIGN KEY (Device_ID)
+        REFERENCES Device(Device_ID) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_ds_user FOREIGN KEY (Created_By)
+        REFERENCES `User`(User_ID) ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 CREATE TABLE System_Event (

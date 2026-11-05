@@ -17,6 +17,7 @@ const aiRouter = require('./routes/ai');
 const notificationRouter = require('./routes/notification');
 const activityLogRouter = require('./routes/activityLog');
 const settingsRouter = require('./routes/settings');
+const scheduleRouter = require('./routes/schedule');
 
 const app = express();
 
@@ -68,6 +69,7 @@ app.use('/api/homes/:homeId/iot', iotRouter);
 app.use('/api/homes/:homeId/ai', aiRouter);
 app.use('/api/homes/:homeId/activity-logs', activityLogRouter);
 app.use('/api/homes/:homeId/settings', settingsRouter);
+app.use('/api/homes/:homeId/schedules', scheduleRouter);   // hẹn giờ thiết bị
 app.use('/api/homes', homeRoutes);
 app.use('/api/notifications', notificationRouter);
 
