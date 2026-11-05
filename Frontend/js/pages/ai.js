@@ -3,7 +3,7 @@
 //    điều khiển thiết bị và trợ lý trả lời (feed 'assistant' / V13, sự kiện Socket.IO 'assistant_message').
 //  - FaceAI (UC 3.4): vector 128 chiều (face-api.js) → POST /ai/face-profiles và
 //    POST /ai/doors/:doorName/face-recognition (x-iot-key hoặc người dùng có DOOR_UNLOCK) — khoảng cách Euclid ≤ 0.55 thì mở cửa.
-import { state, on, onChange, addLog, markDoorOpened, applyDeviceState, refreshHomeData } from '../store.js';
+import { state, on, onChange, addLog, markDoorOpened, applyDeviceState, refreshHomeData, noteOverride } from '../store.js';
 import { api } from '../api.js';
 import { FACE } from '../config.js';
 import { asList, esc, fmtDate, fullTime, label, pickAny, idValue } from '../utils/fields.js';
@@ -11,7 +11,8 @@ import { normFaceProfile, normMember } from '../models.js';
 import { startCamera, stopCamera, extractDescriptor, parseVector } from '../services/faceEngine.js';
 import { panel, pageTitle, badge, button, field, inputCls, emptyState, loadingBlock, errorBlock, toast, busy, fail } from '../ui.js';
 
-const QUICK = ['Bật đèn', 'Tắt đèn', 'Đổi đèn màu đỏ', 'Bật quạt 50%', 'Quạt mức 3', 'Tắt quạt', 'Bật còi'];
+const QUICK = ['Bật đèn', 'Tắt đèn', 'Đổi đèn màu đỏ', 'Bật quạt 50%', 'Quạt mức 3', 'Tắt quạt', 'Bật còi',
+  'Tắt quạt sau 30 phút', 'Hẹn giờ tắt đèn lúc 10 giờ tối', 'Chúc ngủ ngon', 'Thức dậy'];
 const rawJson = (res) => (res == null ? '' : `<details class="mt-2"><summary class="text-[11px] text-slate-400 cursor-pointer">Phản hồi Backend</summary>
   <pre class="mt-1 text-[11px] bg-slate-900 text-slate-100 rounded p-2 overflow-x-auto max-h-48">${esc(JSON.stringify(res, null, 2))}</pre></details>`);
 
@@ -41,7 +42,8 @@ export const aiPage = {
             <div class="text-xs font-semibold text-slate-500 mb-1.5 flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">smart_toy</span>Trợ lý (cũng hiện trên LCD của mạch)</div>
             <ul id="assistant-log" class="space-y-1 text-xs"></ul>
           </div>
-          <p class="text-[11px] text-slate-400 mt-3">Văn bản được gửi tới <span class="font-mono">POST /ai/voice-commands</span> (cần quyền VOICE_USE).</p>` })}
+          <p class="text-[11px] text-slate-400 mt-3">Văn bản được gửi tới <span class="font-mono">POST /ai/voice-commands</span> (cần quyền VOICE_USE).
+            Lệnh giọng nói có độ ưu tiên cao nhất: thiết bị vừa ra lệnh sẽ không bị tự động hoá hay hẹn giờ trên web đảo lại trong thời gian ưu tiên (mặc định 30 phút).</p>` })}
 
         ${panel({ title: 'Vector khuôn mặt', icon: 'face', body: `
           <div class="relative rounded-lg overflow-hidden bg-slate-900 aspect-video">
@@ -102,8 +104,9 @@ export const aiPage = {
         showVoice(t, message, 'text-emerald-600', res);
         toast(message, 'emerald');
         const data = res?.data ?? {};
-        if (data.targetDeviceId != null) applyDeviceState(data.targetDeviceId, data.workingState, data.color);
-        if (data.autoModeDisabled) setTimeout(() => refreshHomeData({ silent: true }), 300);
+        if (data.targetDeviceId != null && data.state === 'sent') applyDeviceState(data.targetDeviceId, data.workingState, data.color);
+        if (data.priorityUntil) noteOverride(data.targetDeviceId, 'VOICE_COMMAND', data.priorityUntil);
+        if (data.intent === 'sleep' || data.intent === 'wake') setTimeout(() => refreshHomeData({ silent: true }), 300);
         addLog('device', `Giọng nói "${t}" → ${message}`);
       } catch (e) {
         if (!alive) return;

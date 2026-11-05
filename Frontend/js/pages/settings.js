@@ -1,15 +1,15 @@
 // Cài đặt: ngưỡng cảnh báo (lưu ở Backend: GET/PUT /homes/:homeId/settings) + cảm biến IoT (GET/POST /iot/sensors, POST /telemetry) + thông tin kết nối.
 import { THRESHOLDS, CONFIG, SENSOR_TYPES, DATA_QUALITIES } from '../config.js';
-import { state, on, onChange, applyThresholds, resetThresholds, refreshHomeData } from '../store.js';
+import { state, on, onChange, applyThresholds, resetThresholds, refreshHomeData, saveSleepSettings, sleepNow } from '../store.js';
 import { api } from '../api.js';
 import { esc, hhmm, idValue } from '../utils/fields.js';
-import { panel, pageTitle, button, field, inputCls, emptyState, errorBlock, linkButton, toast, busy, formValues, fail } from '../ui.js';
+import { panel, pageTitle, button, field, inputCls, emptyState, errorBlock, linkButton, toast, busy, formValues, fail, toggle } from '../ui.js';
 
 const FIELDS = [
-  ['TEMP_MAX', 'Nhiệt độ tối đa', '°C', 'Vượt ngưỡng: cảnh báo, quạt 100% + bật còi (chế độ tự động)'],
+  ['TEMP_MAX', 'Nhiệt độ tối đa', '°C', 'Vượt ngưỡng: cảnh báo, quạt 50% → 75% → 100% theo mức nóng, bật còi'],
   ['HUMIDITY_MIN', 'Độ ẩm tối thiểu', '%', 'Dưới mức này: cảnh báo độ ẩm'],
   ['HUMIDITY_MAX', 'Độ ẩm tối đa', '%', 'Trên mức này: cảnh báo độ ẩm'],
-  ['LIGHT_MIN', 'Ánh sáng tối thiểu', 'Lux', 'Dưới mức này: tự bật đèn (chế độ tự động)'],
+  ['LIGHT_MIN', 'Ánh sáng tối thiểu', 'Lux', 'Dưới mức này và có người: tự bật đèn (chế độ tự động)'],
 ];
 const KIND_LABEL = { temperature: 'Nhiệt độ', humidity: 'Độ ẩm', light: 'Ánh sáng', motion: 'Chuyển động' };
 
@@ -32,6 +32,7 @@ export const settingsPage = {
             <p class="text-[11px] text-slate-400">Ngưỡng lưu ở Backend, áp dụng cho mọi thành viên của nhà. Cần quyền DEVICE_MANAGE để sửa.</p>
           </form>` })}
         <div id="rules" class="lg:col-span-5"></div>
+        <div id="sleep-box" class="lg:col-span-12"></div>
       </div>
       <div id="sensor-box"></div>
       ${panel({ title: 'Kết nối Backend', icon: 'lan', body: `
@@ -47,12 +48,47 @@ export const settingsPage = {
       $('#rules').innerHTML = panel({ title: 'Quy tắc tự động', icon: 'rule', body: `
         <ul class="text-sm text-slate-600 space-y-2 list-disc pl-5">
           <li>Quy tắc chạy trên Backend mỗi khi có số liệu mới — không cần mở web.</li>
-          <li>Nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C: cảnh báo, quạt 100% và bật còi (chế độ tự động).</li>
-          <li>PIR phát hiện chuyển động hoặc ánh sáng &lt; ${THRESHOLDS.LIGHT_MIN} Lux: bật đèn.</li>
-          <li>Chỉ tự động hoá theo số liệu mới (≤ 10 phút). Điều khiển tay sẽ chuyển nhà sang thủ công.</li>
+          <li>Nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C: cảnh báo, bật còi, quạt 50%; &gt; ${THRESHOLDS.TEMP_MAX + 2}°C: 75%; &gt; ${THRESHOLDS.TEMP_MAX + 4}°C: 100%. Tắt quạt khi ≤ ${THRESHOLDS.TEMP_MAX - 1}°C.</li>
+          <li>Đèn chỉ bật khi trời tối (&lt; ${THRESHOLDS.LIGHT_MIN} Lux) <b>và</b> có người (PIR). Không thấy người vài phút thì tắt, dù sáng hay tối.</li>
+          <li>Giờ ngủ: tắt đèn lúc bắt đầu, giữ đèn tắt kể cả khi tối / có chuyển động; còi chỉ kêu khi &gt; ${THRESHOLDS.TEMP_MAX + 5}°C.</li>
+          <li>Ưu tiên: <b>giọng nói</b> &gt; thao tác web / hẹn giờ / giờ ngủ &gt; tự động. Thiết bị vừa được điều khiển tay chỉ bị “giữ” riêng trong ${state.overrideMinutes} phút.</li>
+          <li>Chỉ tự động hoá theo số liệu mới (≤ 10 phút).</li>
           <li>Cảnh báo mới được gửi vào Thông báo của chủ nhà và hiện trên LCD qua trợ lý.</li>
         </ul>` });
     };
+    const paintSleep = () => {
+      if (!hasHome) { $('#sleep-box').innerHTML = ''; return; }
+      const sl = state.sleep;
+      const status = sl.sleeping ? '<span class="text-indigo-600 font-semibold">Đang ngủ</span>' : '<span class="text-amber-600 font-semibold">Đang thức</span>';
+      const manual = sl.manual !== 'NONE' && sl.manualUntil && Date.parse(sl.manualUntil) > Date.now()
+        ? ` · theo lệnh "${sl.manual === 'SLEEP' ? 'đi ngủ' : 'thức dậy'}" tới ${hhmm(Date.parse(sl.manualUntil))}` : '';
+      $('#sleep-box').innerHTML = panel({ title: 'Chế độ ngủ & ưu tiên lệnh', icon: 'bedtime', body: `
+        <div class="grid md:grid-cols-2 gap-6">
+          <form id="sleep-form" class="space-y-4">
+            <label class="flex items-center justify-between gap-4">
+              <span><span class="block text-sm font-semibold text-slate-800">Tự động theo khung giờ ngủ</span><span class="block text-xs text-slate-400">Bắt đầu giờ ngủ: tắt mọi đèn, không tự bật lại tới giờ thức dậy</span></span>
+              ${toggle(sl.enabled, 'sleep-enabled')}
+            </label>
+            <div class="grid grid-cols-3 gap-3">
+              ${field('Đi ngủ lúc', `<input name="sleepStart" type="time" value="${esc(sl.start)}" class="${inputCls}">`)}
+              ${field('Thức dậy lúc', `<input name="sleepEnd" type="time" value="${esc(sl.end)}" class="${inputCls}">`)}
+              ${field('Ưu tiên lệnh tay (phút)', `<input name="overrideMinutes" type="number" min="0" max="1440" value="${state.overrideMinutes}" class="${inputCls} font-mono">`)}
+            </div>
+            ${button('Lưu', { type: 'submit' })}
+            <p class="text-[11px] text-slate-400">Cần quyền DEVICE_MANAGE. "Ưu tiên lệnh tay" = số phút tự động hoá không đảo lại thiết bị vừa bị điều khiển bằng tay / giọng nói (0 = không giữ).</p>
+          </form>
+          <div class="space-y-3">
+            <div class="text-sm text-slate-600">Hiện tại: ${status}${manual}</div>
+            <div class="flex flex-wrap gap-2">
+              ${button('Đi ngủ ngay', { act: 'sleep-now', val: 'sleep', icon: 'bedtime' })}
+              ${button('Thức dậy', { act: 'sleep-now', val: 'awake', tone: 'secondary', icon: 'wb_sunny' })}
+              ${button('Theo khung giờ', { act: 'sleep-now', val: 'auto', tone: 'ghost', icon: 'schedule' })}
+            </div>
+            <p class="text-xs text-slate-500">Cũng có thể nói <i>"chúc ngủ ngon"</i>, <i>"tắt đèn đi ngủ"</i> hoặc <i>"thức dậy"</i>. Lệnh "đi ngủ" có hiệu lực tới giờ thức dậy; "thức dậy" có hiệu lực tới giờ ngủ kế tiếp.</p>
+          </div>
+        </div>` });
+    };
+
     const paintSocket = () => {
       $('#sock-state').innerHTML = state.socketConnected ? '<span class="text-emerald-600">Đã kết nối</span>' : '<span class="text-rose-600">Mất kết nối</span>';
     };
@@ -147,6 +183,18 @@ export const settingsPage = {
         });
       }
       if (b.dataset.act === 'reload') await busy(b, () => refreshHomeData());
+      if (b.dataset.act === 'sleep-enabled') {
+        const on = b.getAttribute('aria-pressed') !== 'true';
+        b.setAttribute('aria-pressed', String(on));
+        b.classList.toggle('bg-sky-600', on); b.classList.toggle('bg-slate-300', !on);
+        b.firstElementChild.classList.toggle('translate-x-5', on);
+      }
+      if (b.dataset.act === 'sleep-now') {
+        await busy(b, async () => {
+          try { const res = await sleepNow(b.dataset.val); toast(res?.message ?? 'Đã cập nhật', 'sky'); await refreshHomeData({ silent: true }); }
+          catch (err) { fail(err, 'Không đổi được chế độ ngủ'); }
+        });
+      }
     });
 
     root.addEventListener('submit', async (e) => {
@@ -154,6 +202,18 @@ export const settingsPage = {
       const f = e.target;
       const v = formValues(f);
       const btn = f.querySelector('[type=submit]');
+      if (f.id === 'sleep-form') {
+        if (!v.sleepStart || !v.sleepEnd) return toast('Nhập đủ giờ ngủ và giờ thức dậy', 'rose');
+        if (v.sleepStart === v.sleepEnd) return toast('Giờ ngủ và giờ thức dậy phải khác nhau', 'rose');
+        const overrideMinutes = Number(v.overrideMinutes);
+        if (!Number.isInteger(overrideMinutes) || overrideMinutes < 0 || overrideMinutes > 1440) return toast('Số phút ưu tiên phải là số nguyên 0–1440', 'rose');
+        const sleepEnabled = f.querySelector('[data-act=sleep-enabled]').getAttribute('aria-pressed') === 'true';
+        await busy(btn, async () => {
+          try { await saveSleepSettings({ sleepEnabled, sleepStart: v.sleepStart, sleepEnd: v.sleepEnd, overrideMinutes }); toast('Đã lưu chế độ ngủ', 'emerald'); }
+          catch (err) { fail(err, 'Không lưu được chế độ ngủ'); }
+        });
+        return;
+      }
       if (f.id === 'thresholds') {
         const vals = {};
         for (const [k] of FIELDS) vals[k] = parseFloat(v[k]);
@@ -196,9 +256,13 @@ export const settingsPage = {
     const fillThresholds = () => FIELDS.forEach(([k]) => { const el = $(`[name=${k}]`); if (el && document.activeElement !== el) el.value = THRESHOLDS[k]; });
 
     paintRules();
+    paintSleep();
     paintSocket();
     paintSensorBox();
+    // Vẽ lại khung ngủ khi cài đặt đổi, trừ lúc đang sửa form (tránh mất giá trị đang nhập)
+    const sleepSig = () => JSON.stringify([state.sleep, state.overrideMinutes]);
     const offs = [
+      onChange('settings', sleepSig, () => { if (!root.querySelector('#sleep-form')?.contains(document.activeElement)) paintSleep(); }),
       on('settings', () => { fillThresholds(); paintRules(); }),
       on('socket', paintSocket),
       on('sensor', paintSensorTable),

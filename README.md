@@ -50,6 +50,13 @@ mysql --default-character-set=utf8mb4 -u root -p < init.sql        # tạo lại
 mysql --default-character-set=utf8mb4 -u root -p < seed_demo.sql   # (tuỳ chọn) dữ liệu demo
 ```
 
+> **Đã có DB từ trước?** Không cần chạy lại `init.sql` (sẽ xoá dữ liệu). Chạy migration để thêm chế độ ngủ + hẹn giờ:
+>
+> ```bash
+> cd Database
+> mysql --default-character-set=utf8mb4 -u root -p < migrations/2026-11-05_sleep_schedule.sql
+> ```
+
 Dữ liệu demo gồm các tài khoản sau, mật khẩu đều là `123456`:
 
 - `owner@yolohome.local` (chủ nhà)
@@ -85,6 +92,7 @@ Các biến quan trọng khác:
 | `NODE_ENV` | `development` thì lỗi API trả kèm stack trace. Mặc định không trả. |
 | `CORS_ORIGIN` | Danh sách origin của Frontend, cách nhau bằng dấu phẩy. |
 | `DOOR_AUTO_LOCK_SECONDS` | Số giây cửa tự khoá lại sau khi mở. Mặc định 10, đặt 0 để tắt. |
+| `LIGHT_NO_MOTION_MINUTES` | Không thấy người (PIR) trong ngần này phút thì tự tắt đèn. Mặc định 2. |
 
 Server chạy tại `http://localhost:3000` (kiểm tra: `GET /health`).
 
@@ -140,13 +148,44 @@ Mọi API (trừ đăng ký / đăng nhập) cần header `Authorization: Bearer
 | `GET` | `/api/homes/:homeId/settings` | Thành viên | `tempMax`, `humidityMin`, `humidityMax`, `lightMin`, `autoMode` và `alerts` (cảnh báo đang hoạt động). |
 | `PUT` | `/api/homes/:homeId/settings` | `DEVICE_MANAGE` | Cập nhật 4 ngưỡng. Điều kiện `humidityMin < humidityMax`. |
 | `PUT` | `/api/homes/:homeId/settings/mode` | `DEVICE_CONTROL` | `{ "autoMode": true \| false }` |
+| `PUT` | `/api/homes/:homeId/settings/sleep` | `DEVICE_MANAGE` | `{ "sleepEnabled", "sleepStart": "22:30", "sleepEnd": "06:00", "overrideMinutes": 30 }` |
+| `POST` | `/api/homes/:homeId/settings/sleep-now` | `DEVICE_CONTROL` | `{ "mode": "sleep" \| "awake" \| "auto" }`: đi ngủ ngay (tắt đèn), thức dậy, hoặc theo khung giờ |
+| `DELETE` | `/api/homes/:homeId/settings/overrides/:deviceId` | `DEVICE_CONTROL` | Bỏ ưu tiên lệnh tay trên thiết bị, trả về cho tự động hoá |
 
-Ở chế độ tự động, server thực hiện các quy tắc sau:
+`GET /settings` trả thêm `sleepEnabled`, `sleepStart`, `sleepEnd`, `sleeping`, `overrideMinutes`, `overrides` (thiết bị đang được giữ ưu tiên) và `insight` (kết quả phân tích tự động gần nhất).
 
-- Nhiệt độ vượt `tempMax`: cảnh báo, quạt chạy 100% và bật còi.
-- PIR phát hiện có người hoặc ánh sáng dưới `lightMin`: bật đèn.
+Ở chế độ tự động, server phân tích số liệu mỗi khi có giá trị mới và quét lại mỗi 30 giây (`services/automation.js`):
 
-Mỗi cảnh báo mới tạo một thông báo cho chủ nhà và một câu trợ lý gửi xuống LCD. Khi người dùng điều khiển tay (trên web hoặc bằng giọng nói), nhà chuyển sang thủ công.
+| Điều kiện | Hành động |
+|---|---|
+| Nhiệt độ > `tempMax` / > `tempMax`+2 / > `tempMax`+4 | Cảnh báo, bật còi, quạt 50% / 75% / 100% |
+| Nhiệt độ ≤ `tempMax` − 1 | Tắt quạt (vùng trễ 1°C để quạt không bật/tắt liên tục quanh ngưỡng) |
+| Trời tối (< `lightMin`) **và** có người (PIR) | Bật đèn |
+| Không thấy người trong `LIGHT_NO_MOTION_MINUTES` phút (mặc định 2) | Tắt đèn, dù sáng hay tối |
+| Có người nhưng trời sáng | Không bật đèn; đèn đang bật thì giữ (ánh sáng của chính bóng đèn không làm đèn tắt) |
+| Đang giờ ngủ (`sleepStart`–`sleepEnd`, hoặc lệnh "đi ngủ") | Lúc bắt đầu tắt mọi đèn; giữ đèn tắt dù trời tối / có chuyển động; còi chỉ kêu khi > `tempMax`+5 |
+
+**Độ ưu tiên:** giọng nói (4) > thao tác web, hẹn giờ, giờ ngủ (3) > tự động (1). Mỗi lệnh của người "giữ" riêng thiết bị đó trong `overrideMinutes` phút (mặc định 30, `services/priority.js`): tự động hoá không đảo lại, hẹn giờ tạo trên web cũng bị bỏ qua nếu thiết bị đang được giữ bởi giọng nói. Lệnh của người luôn được thực hiện. Điều khiển tay **không** còn tắt chế độ tự động của cả nhà. Trạng thái giữ nằm trong bộ nhớ server, khởi động lại thì hết.
+
+Mỗi cảnh báo mới tạo một thông báo cho chủ nhà và một câu trợ lý gửi xuống LCD.
+
+## 3b. Hẹn giờ thiết bị
+
+| Phương thức | Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|
+| `GET` | `/api/homes/:homeId/schedules` | `DEVICE_VIEW` | Danh sách hẹn giờ (`nextRunAt`, `lastResult`: `SUCCESS` / `FAILED` / `SKIPPED` / `MISSED`). |
+| `POST` | `/api/homes/:homeId/schedules` | `DEVICE_CONTROL` | Tạo hẹn giờ (body ở dưới). |
+| `PATCH` | `/api/homes/:homeId/schedules/:scheduleId` | `DEVICE_CONTROL` | `{ "enabled": true \| false }` |
+| `DELETE` | `/api/homes/:homeId/schedules/:scheduleId` | `DEVICE_CONTROL` | Xoá hẹn giờ. |
+
+```json
+{ "deviceId": 2, "action": "TURN_OFF", "afterMinutes": 30 }
+{ "deviceId": 1, "action": "TURN_OFF", "runAt": "2026-11-05T22:00:00+07:00" }
+{ "deviceId": 1, "action": "TURN_ON", "repeat": true, "time": "18:30", "days": [1, 2, 3, 4, 5] }
+{ "deviceId": 2, "action": "SET_SPEED", "speed": 60, "afterMinutes": 10 }
+```
+
+`days`: 0 = Chủ nhật … 6 = Thứ bảy. Server quét mỗi 15 giây (`services/scheduler.js`); nếu server tắt đúng lúc đến hạn và trễ quá 10 phút thì lịch được ghi `MISSED` thay vì chạy bất ngờ.
 
 ## 4. Quản lý Thành viên (Member)
 
@@ -217,8 +256,10 @@ Một số câu lệnh giọng nói được hiểu:
 - "Đổi đèn sang màu xanh dương"
 - "Bật quạt 50%", "quạt mức 2", "tắt quạt"
 - "Bật còi"
+- Hẹn giờ: "Tắt quạt sau 30 phút", "Bật đèn sau 1 tiếng", "Hẹn giờ tắt đèn lúc 10 giờ tối", "Lúc 6h30 sáng bật đèn"
+- Chế độ ngủ: "Chúc ngủ ngon", "Tắt đèn đi ngủ" / "Thức dậy", "Tắt chế độ ngủ"
 
-Lệnh mở cửa bằng giọng nói bị từ chối vì lý do an toàn.
+Lệnh mở cửa bằng giọng nói bị từ chối vì lý do an toàn. Lệnh giọng nói có độ ưu tiên cao nhất (xem mục 3).
 
 ## 8. Cảm biến & IoT (IoT Telemetry)
 
@@ -253,6 +294,9 @@ Kết nối với `auth: { token }`, sau đó gửi `join_home` kèm `homeId`. S
 | `alerts_updated` | `{ alerts: [{ key, level, message }] }` |
 | `settings_updated` | `{ settings }` |
 | `assistant_message` | `{ text, timestamp }` |
+| `overrides_updated` | `{ overrides: [{ deviceId, source, label, until }] }` |
+| `automation_insight` | `{ at, sleeping, items: [{ key, text }] }` |
+| `schedules_updated` | `{ schedules: [...] }` |
 
 ---
 

@@ -57,6 +57,11 @@ const config = {
   automation: {
     freshDataMs: 10 * 60 * 1000,   // chỉ tự động hoá theo số liệu mới hơn 10 phút
     retryAfterMs: 60 * 1000,       // gửi lệnh tự động lỗi -> chờ 60s mới thử lại thiết bị đó
+    // Không thấy người (PIR) trong ngần này phút thì tắt đèn. PIR về 0 khi người ngồi yên nên cần thời gian chờ.
+    occupancyHoldMs: (() => {
+      const n = parseFloat(process.env.LIGHT_NO_MOTION_MINUTES ?? '');
+      return (Number.isFinite(n) && n >= 0 ? Math.min(n, 120) : 2) * 60 * 1000;
+    })(),
   },
 };
 

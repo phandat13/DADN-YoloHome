@@ -55,6 +55,11 @@ export const state = {
   doorOpen: false,              // có cửa đang mở khoá (theo trạng thái Backend)
   doorLockAt: null,             // thời điểm Backend sẽ tự khoá cửa (ms)
   alerts: [],                   // cảnh báo ngưỡng đang hoạt động (Backend tính)
+  sleep: { enabled: true, start: '22:30', end: '06:00', manual: 'NONE', manualUntil: null, sleeping: false },
+  overrideMinutes: 30,          // số phút lệnh tay / giọng nói được ưu tiên hơn tự động hoá
+  overrides: [],                // [{ deviceId, source, label, until }] thiết bị đang được giữ ưu tiên
+  insight: null,                // { at, sleeping, items: [{ key, text }] } kết quả phân tích tự động gần nhất
+  schedules: [],                // hẹn giờ thiết bị (GET /schedules)
   logs: [],                     // nhật ký cục bộ (cảnh báo, tự động hoá, thao tác)
   unread: 0,
   socketConnected: false,
@@ -183,8 +188,8 @@ export async function refreshHomeData({ silent = false } = {}) {
   const hid = state.homeId;
   if (hid == null || !getToken()) return;
   if (!silent) { state.loading = true; emit('loading'); }
-  const [devs, sens, doors, settings] = await Promise.allSettled([
-    api.devices.list(hid), api.iot.sensors(hid), api.doors.list(hid), api.settings.get(hid),
+  const [devs, sens, doors, settings, schedules] = await Promise.allSettled([
+    api.devices.list(hid), api.iot.sensors(hid), api.doors.list(hid), api.settings.get(hid), api.schedules.list(hid),
   ]);
   if (!sameId(hid, state.homeId)) return;
   const take = (r, key, norm) => {
@@ -195,6 +200,7 @@ export async function refreshHomeData({ silent = false } = {}) {
   const d = take(devs, 'devices', normDevice);   // Backend là nguồn trạng thái duy nhất
   if (d) { state.devices = d; syncBuzzer(); }
   if (settings.status === 'fulfilled') applySettings(asObject(settings.value, 'settings'));
+  if (schedules.status === 'fulfilled') { state.schedules = asList(schedules.value, 'schedules'); emit('schedules'); }
   const s = take(sens, 'sensors', normSensor);
   if (s) state.sensors = s;
   const dr = take(doors, 'doors', normDoor);
@@ -286,6 +292,21 @@ function connectSocket() {
     emit('motion_detected');     // để trang nào cần (dashboard...) tự lắng nghe
   });
   socket.on('settings_updated', (data) => { if (sameId(data?.homeId, state.homeId)) applySettings(data.settings); });
+  socket.on('overrides_updated', (data) => {
+    if (!sameId(data?.homeId, state.homeId)) return;
+    state.overrides = Array.isArray(data.overrides) ? data.overrides : [];
+    emit('overrides');
+  });
+  socket.on('automation_insight', (data) => {
+    if (!sameId(data?.homeId, state.homeId)) return;
+    state.insight = data;
+    emit('insight');
+  });
+  socket.on('schedules_updated', (data) => {
+    if (!sameId(data?.homeId, state.homeId)) return;
+    state.schedules = Array.isArray(data.schedules) ? data.schedules : [];
+    emit('schedules');
+  });
   socket.on('assistant_message', (data) => {
     if (!sameId(data?.homeId, state.homeId)) return;
     state.assistant.unshift({ ts: toTs(data.timestamp) ?? Date.now(), text: data.text });
@@ -300,6 +321,15 @@ function applySettings(s) {
   const map = { TEMP_MAX: 'tempMax', HUMIDITY_MIN: 'humidityMin', HUMIDITY_MAX: 'humidityMax', LIGHT_MIN: 'lightMin' };
   for (const [k, src] of Object.entries(map)) if (Number.isFinite(Number(s[src]))) THRESHOLDS[k] = Number(s[src]);
   if (typeof s.autoMode === 'boolean') state.mode = s.autoMode ? 'auto' : 'manual';
+  if (typeof s.sleepEnabled === 'boolean') {
+    state.sleep = {
+      enabled: s.sleepEnabled, start: s.sleepStart, end: s.sleepEnd,
+      manual: s.sleepManual ?? 'NONE', manualUntil: s.sleepManualUntil ?? null, sleeping: !!s.sleeping,
+    };
+  }
+  if (Number.isFinite(Number(s.overrideMinutes))) state.overrideMinutes = Number(s.overrideMinutes);
+  if (Array.isArray(s.overrides)) { state.overrides = s.overrides; emit('overrides'); }
+  if (s.insight !== undefined) { state.insight = s.insight; emit('insight'); }
   if (Array.isArray(s.alerts)) setAlerts(s.alerts);
   emit('settings'); emit('devices'); emit('sensor');
 }
@@ -403,7 +433,10 @@ export async function controlDevice(dev, change, source = 'web') {
     const res = await api.devices.command(state.homeId, dev.id, body);
     const data = asObject(res, 'data');
     if (data?.workingState != null) applyDeviceState(dev.id, data.workingState, data.color);
-    if (data?.autoModeDisabled) { state.mode = 'manual'; addLog('device', 'Chuyển sang chế độ thủ công (thao tác tay)'); emit('devices'); }
+    if (data?.priorityUntil) {
+      noteOverride(dev.id, 'USER', data.priorityUntil);
+      addLog('device', `${dev.name}: tự động hoá tạm nhường lệnh tay tới ${hhmm(Date.parse(data.priorityUntil))}`);
+    }
     addLog('device', `${change.color ? `${dev.name} đổi màu ${dev.color}` : devLabel(dev)} (${source})`);
   } catch (e) {
     Object.assign(dev, prev);
@@ -421,6 +454,40 @@ export async function setMode(mode) {
   applySettings(asObject(res, 'data'));
   addLog('device', `Chuyển sang chế độ ${mode === 'auto' ? 'tự động' : 'thủ công'}`);
 }
+
+// Chế độ ngủ: 'sleep' (ngủ ngay) | 'awake' (thức dậy) | 'auto' (theo khung giờ)
+export async function sleepNow(mode) {
+  if (state.homeId == null) return null;
+  const res = await api.settings.sleepNow(state.homeId, mode);
+  applySettings(asObject(res, 'data'));
+  addLog('device', { sleep: 'Bật chế độ ngủ', awake: 'Tắt chế độ ngủ (thức dậy)', auto: 'Chế độ ngủ theo khung giờ' }[mode]);
+  return res;
+}
+
+export async function saveSleepSettings(body) {
+  const res = await api.settings.updateSleep(state.homeId, body);
+  applySettings(asObject(res, 'data'));
+  return res;
+}
+
+// Trả thiết bị đang được giữ ưu tiên (lệnh tay / giọng nói) về cho tự động hoá
+export async function releaseOverride(deviceId) {
+  const res = await api.settings.releaseOverride(state.homeId, deviceId);
+  const data = asObject(res, 'data');
+  if (Array.isArray(data?.overrides)) { state.overrides = data.overrides; emit('overrides'); }
+  return res;
+}
+
+// Ghi nhận giữ ưu tiên ngay từ phản hồi REST (Socket.IO 'overrides_updated' sẽ đồng bộ lại sau)
+const HOLD_LABEL = { USER: 'Người dùng', VOICE_COMMAND: 'Giọng nói' };
+export function noteOverride(deviceId, source, until) {
+  if (deviceId == null || !until) return;
+  state.overrides = [...state.overrides.filter((o) => !sameId(o.deviceId, deviceId)),
+    { deviceId, source, label: HOLD_LABEL[source] ?? source, until }];
+  emit('overrides');
+}
+
+export const overrideOf = (deviceId) => state.overrides.find((o) => sameId(o.deviceId, deviceId) && Date.parse(o.until) > Date.now()) ?? null;
 
 // ---------------- Cửa ----------------
 // Backend tự khoá cửa sau DOOR_AUTO_LOCK_SECONDS (mặc định 10s) và gửi LOCK_DOOR lên feed Adafruit 'smart-door'.

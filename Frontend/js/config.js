@@ -17,7 +17,7 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
   TEMP_MAX: 35,            // °C - vượt ngưỡng: cảnh báo + quạt 100% (chế độ tự động)
   HUMIDITY_MIN: 40,        // %
   HUMIDITY_MAX: 70,        // %
-  LIGHT_MIN: 200,          // Lux - dưới mức này thì bật đèn (chế độ tự động)
+  LIGHT_MIN: 200,          // Lux - dưới mức này VÀ có người thì bật đèn (chế độ tự động)
 });
 export const THRESHOLDS = { ...DEFAULT_THRESHOLDS };
 

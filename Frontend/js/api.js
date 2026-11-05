@@ -133,6 +133,18 @@ export const api = {
     get: (homeId) => request('GET', `${H(homeId)}/settings`),
     update: (homeId, body) => request('PUT', `${H(homeId)}/settings`, { body }),
     setMode: (homeId, autoMode) => request('PUT', `${H(homeId)}/settings/mode`, { body: { autoMode } }),
+    // body: { sleepEnabled, sleepStart: 'HH:MM', sleepEnd: 'HH:MM', overrideMinutes }
+    updateSleep: (homeId, body) => request('PUT', `${H(homeId)}/settings/sleep`, { body }),
+    sleepNow: (homeId, mode) => request('POST', `${H(homeId)}/settings/sleep-now`, { body: { mode } }),   // 'sleep' | 'awake' | 'auto'
+    releaseOverride: (homeId, deviceId) => request('DELETE', `${H(homeId)}/settings/overrides/${enc(deviceId)}`),
+  },
+  // Hẹn giờ thiết bị
+  schedules: {
+    list: (homeId) => request('GET', `${H(homeId)}/schedules`),
+    // body: { deviceId, action, speed?, color?, repeat, runAt? | afterMinutes?, time?: 'HH:MM', days?: [0..6], note? }
+    create: (homeId, body) => request('POST', `${H(homeId)}/schedules`, { body }),
+    setEnabled: (homeId, scheduleId, enabled) => request('PATCH', `${H(homeId)}/schedules/${enc(scheduleId)}`, { body: { enabled } }),
+    remove: (homeId, scheduleId) => request('DELETE', `${H(homeId)}/schedules/${enc(scheduleId)}`),
   },
   // 3.5 Smart door
   doors: {
