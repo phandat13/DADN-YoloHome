@@ -9,7 +9,7 @@ const FIELDS = [
   ['TEMP_MAX', 'Nhiệt độ tối đa', '°C', 'Vượt ngưỡng: cảnh báo, quạt 50% → 75% → 100% theo mức nóng, bật còi'],
   ['HUMIDITY_MIN', 'Độ ẩm tối thiểu', '%', 'Dưới mức này: cảnh báo độ ẩm'],
   ['HUMIDITY_MAX', 'Độ ẩm tối đa', '%', 'Trên mức này: cảnh báo độ ẩm'],
-  ['LIGHT_MIN', 'Ánh sáng tối thiểu', 'Lux', 'Dưới mức này: tự bật đèn (chế độ tự động)'],
+  ['LIGHT_MIN', 'Ánh sáng tối thiểu', 'Lux', 'Dưới mức này và có người: tự bật đèn (chế độ tự động)'],
 ];
 const KIND_LABEL = { temperature: 'Nhiệt độ', humidity: 'Độ ẩm', light: 'Ánh sáng', motion: 'Chuyển động' };
 
@@ -49,7 +49,7 @@ export const settingsPage = {
         <ul class="text-sm text-slate-600 space-y-2 list-disc pl-5">
           <li>Quy tắc chạy trên Backend mỗi khi có số liệu mới — không cần mở web.</li>
           <li>Nhiệt độ &gt; ${THRESHOLDS.TEMP_MAX}°C: cảnh báo, bật còi, quạt 50%; &gt; ${THRESHOLDS.TEMP_MAX + 2}°C: 75%; &gt; ${THRESHOLDS.TEMP_MAX + 4}°C: 100%. Tắt quạt khi ≤ ${THRESHOLDS.TEMP_MAX - 1}°C.</li>
-          <li>PIR có người hoặc ánh sáng &lt; ${THRESHOLDS.LIGHT_MIN} Lux: bật đèn; tắt khi &gt; ${Math.round(THRESHOLDS.LIGHT_MIN * 1.25)} Lux và không có người (vùng trễ chống nhấp nháy).</li>
+          <li>Đèn chỉ bật khi trời tối (&lt; ${THRESHOLDS.LIGHT_MIN} Lux) <b>và</b> có người (PIR). Không thấy người vài phút thì tắt, dù sáng hay tối.</li>
           <li>Giờ ngủ: tắt đèn lúc bắt đầu, giữ đèn tắt kể cả khi tối / có chuyển động; còi chỉ kêu khi &gt; ${THRESHOLDS.TEMP_MAX + 5}°C.</li>
           <li>Ưu tiên: <b>giọng nói</b> &gt; thao tác web / hẹn giờ / giờ ngủ &gt; tự động. Thiết bị vừa được điều khiển tay chỉ bị “giữ” riêng trong ${state.overrideMinutes} phút.</li>
           <li>Chỉ tự động hoá theo số liệu mới (≤ 10 phút).</li>

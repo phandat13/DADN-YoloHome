@@ -98,7 +98,7 @@ export const controlPage = {
         title: 'Thiết bị ngoại vi', icon: 'tune',
         right: segmented([['auto', 'Tự động'], ['manual', 'Thủ công']], state.mode, 'mode'),
         body: `
-          ${state.mode === 'auto' ? `<p class="text-xs text-sky-700 bg-sky-50 rounded-lg px-3 py-2 mb-2">Chế độ tự động chạy trên Backend (kể cả khi không mở web): đèn theo PIR/ánh sáng, quạt và còi theo nhiệt độ.
+          ${state.mode === 'auto' ? `<p class="text-xs text-sky-700 bg-sky-50 rounded-lg px-3 py-2 mb-2">Chế độ tự động chạy trên Backend (kể cả khi không mở web): đèn bật khi trời tối và có người, tắt khi không có người; quạt và còi theo nhiệt độ.
             Thao tác tay hoặc giọng nói chỉ giữ <b>riêng thiết bị đó</b> trong ${state.overrideMinutes} phút (giọng nói ưu tiên cao nhất), các thiết bị khác vẫn tự động.</p>` : ''}
           ${state.sleep.sleeping ? '<p class="text-xs text-indigo-700 bg-indigo-50 rounded-lg px-3 py-2 mb-2 flex items-center gap-1.5"><span class="material-symbols-outlined text-[16px]">bedtime</span>Đang trong giờ ngủ: đèn được giữ tắt, không tự bật theo trời tối / chuyển động.</p>' : ''}
           ${body}

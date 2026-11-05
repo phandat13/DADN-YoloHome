@@ -92,6 +92,7 @@ Các biến quan trọng khác:
 | `NODE_ENV` | `development` thì lỗi API trả kèm stack trace. Mặc định không trả. |
 | `CORS_ORIGIN` | Danh sách origin của Frontend, cách nhau bằng dấu phẩy. |
 | `DOOR_AUTO_LOCK_SECONDS` | Số giây cửa tự khoá lại sau khi mở. Mặc định 10, đặt 0 để tắt. |
+| `LIGHT_NO_MOTION_MINUTES` | Không thấy người (PIR) trong ngần này phút thì tự tắt đèn. Mặc định 2. |
 
 Server chạy tại `http://localhost:3000` (kiểm tra: `GET /health`).
 
@@ -159,8 +160,9 @@ Mọi API (trừ đăng ký / đăng nhập) cần header `Authorization: Bearer
 |---|---|
 | Nhiệt độ > `tempMax` / > `tempMax`+2 / > `tempMax`+4 | Cảnh báo, bật còi, quạt 50% / 75% / 100% |
 | Nhiệt độ ≤ `tempMax` − 1 | Tắt quạt (vùng trễ 1°C để quạt không bật/tắt liên tục quanh ngưỡng) |
-| PIR có người hoặc ánh sáng < `lightMin` | Bật đèn |
-| Ánh sáng > `lightMin` × 1.25 và không có người | Tắt đèn (giữa hai mức thì giữ nguyên, tránh đèn tự làm sáng cảm biến rồi nhấp nháy) |
+| Trời tối (< `lightMin`) **và** có người (PIR) | Bật đèn |
+| Không thấy người trong `LIGHT_NO_MOTION_MINUTES` phút (mặc định 2) | Tắt đèn, dù sáng hay tối |
+| Có người nhưng trời sáng | Không bật đèn; đèn đang bật thì giữ (ánh sáng của chính bóng đèn không làm đèn tắt) |
 | Đang giờ ngủ (`sleepStart`–`sleepEnd`, hoặc lệnh "đi ngủ") | Lúc bắt đầu tắt mọi đèn; giữ đèn tắt dù trời tối / có chuyển động; còi chỉ kêu khi > `tempMax`+5 |
 
 **Độ ưu tiên:** giọng nói (4) > thao tác web, hẹn giờ, giờ ngủ (3) > tự động (1). Mỗi lệnh của người "giữ" riêng thiết bị đó trong `overrideMinutes` phút (mặc định 30, `services/priority.js`): tự động hoá không đảo lại, hẹn giờ tạo trên web cũng bị bỏ qua nếu thiết bị đang được giữ bởi giọng nói. Lệnh của người luôn được thực hiện. Điều khiển tay **không** còn tắt chế độ tự động của cả nhà. Trạng thái giữ nằm trong bộ nhớ server, khởi động lại thì hết.

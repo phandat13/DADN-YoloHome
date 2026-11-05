@@ -3,9 +3,8 @@
 // Phân tích (chế độ tự động):
 //  - Nhiệt độ  > Temp_Max      : quạt 50%;  > Temp_Max + 2: 75%;  > Temp_Max + 4: 100%; còi báo động.
 //                ≤ Temp_Max - 1: tắt quạt (vùng trễ 1°C để quạt không bật/tắt liên tục quanh ngưỡng).
-//  - Trời tối (ánh sáng < Light_Min) hoặc PIR có người: bật đèn.
-//    Đủ sáng (> Light_Min × 1.25) và không có người: tắt đèn. Ở giữa: giữ nguyên
-//    (đèn bật lên làm cảm biến sáng hơn -> không có vùng trễ thì đèn nhấp nháy).
+//  - Đèn chỉ bật khi TRỜI TỐI (< Light_Min) VÀ CÓ NGƯỜI (PIR). Không thấy người trong
+//    LIGHT_NO_MOTION_MINUTES phút (mặc định 2) thì tắt, dù sáng hay tối. Có người mà trời sáng thì không bật.
 //  - Chế độ ngủ (khung giờ Sleep_Start–Sleep_End hoặc lệnh "đi ngủ"): giữ đèn TẮT, không bật theo trời tối / PIR;
 //    lúc bắt đầu giờ ngủ tắt toàn bộ đèn; còi chỉ kêu khi nóng nguy hiểm (> Temp_Max + 5).
 //  - Lệnh của người (giọng nói > web / hẹn giờ) được ưu tiên: thiết bị vừa được điều khiển tay
@@ -74,17 +73,18 @@ function fanTarget(temp, tempMax) {
   return null;
 }
 
+// Đèn chỉ bật khi TRỜI TỐI VÀ CÓ NGƯỜI. Không có người (sáng hay tối) -> tắt.
+//  occupied: có người (PIR báo, hoặc vừa báo trong vòng occupancyHoldMs) | false | null (nhà không có cảm biến PIR)
+//  dark:     true (< Light_Min) | false (đủ sáng) | null (chưa có số liệu ánh sáng mới)
+//  Đèn đang bật mà vẫn có người thì giữ bật: ánh sáng của chính bóng đèn làm cảm biến sáng hơn,
+//  nếu tắt theo độ sáng thì đèn sẽ nhấp nháy.
 // true = bật, false = tắt, null = giữ nguyên
-function lightTarget({ sleeping, lux, motion, lightMin }) {
+function lightTarget({ sleeping, occupied, dark, lightOn }) {
   if (sleeping) return false;
-  if (motion === true) return true;
-  if (lux != null) {
-    if (lux < lightMin) return true;
-    if (lux > lightMin * LIGHT_HYSTERESIS_RATIO) return false;
-    return null;
-  }
-  if (motion === false) return false;
-  return null;
+  if (occupied === false) return false;
+  if (occupied === null) return dark;          // không có PIR: chỉ theo ánh sáng
+  if (lightOn) return true;                    // có người + đèn đang bật -> giữ bật
+  return dark === true ? true : dark === false ? false : null;
 }
 
 const isOn = (d) => /^on$/i.test(String(d.Available_working_State)) || parseInt(d.Available_working_State, 10) > 0;
@@ -97,6 +97,7 @@ const lastAlertsJson = new Map(); // homeId -> chuỗi JSON cảnh báo lần tr
 const backoff = new Map();        // deviceId -> thời điểm được thử lại
 const queues = new Map();         // homeId -> Promise (xử lý tuần tự từng nhà, tránh gửi trùng lệnh)
 const lastMotion = new Map();
+const lastSeen = new Map();       // homeId -> thời điểm PIR thấy người gần nhất
 const lastSleeping = new Map();   // homeId -> boolean (phát hiện lúc bắt đầu / kết thúc giờ ngủ)
 const insights = new Map();       // homeId -> { at, sleeping, items: [...] }
 const MOTION_COOLDOWN_MS = 30_000;
@@ -213,17 +214,24 @@ async function runEvaluation(io, homeId, { fromTick = false } = {}) {
 
   const light = await findPrimaryDevice(homeId, 'light');
   if (light) {
-    const want = lightTarget({
-      sleeping,
-      lux: l?.fresh && l.value != null ? l.value : null,
-      motion: m?.fresh ? m.value > 0 : null,
-      lightMin: settings.lightMin,
-    });
+    // Có người: PIR đang báo 1, hoặc vừa báo trong vòng occupancyHoldMs (PIR về 0 khi người ngồi yên)
+    const now = Date.now();
+    if (m?.fresh && m.value > 0) lastSeen.set(homeId, now);
+    const holdMs = config.automation.occupancyHoldMs;
+    const seenAgo = lastSeen.has(homeId) ? now - lastSeen.get(homeId) : Infinity;
+    const occupied = m === undefined ? null : seenAgo <= holdMs;
+    const lux = l?.fresh && l.value != null ? l.value : null;
+    const dark = lux == null ? (l === undefined ? true : null)
+      : lux < settings.lightMin ? true : lux > settings.lightMin * LIGHT_HYSTERESIS_RATIO ? false : null;
+    const want = lightTarget({ sleeping, occupied, dark, lightOn: isOn(light) });
+    const luxText = lux == null ? 'chưa có số liệu ánh sáng' : `${lux} lux, ngưỡng ${settings.lightMin}`;
+    const holdMin = Math.round(holdMs / 60000);
     const why = sleeping ? 'giờ ngủ'
-      : m?.fresh && m.value > 0 ? 'có người (PIR)'
-        : l?.fresh && l.value != null ? `ánh sáng ${l.value} lux (ngưỡng ${settings.lightMin})` : 'không có chuyển động';
+      : occupied === false ? `không có người ${Number.isFinite(seenAgo) ? `${holdMin} phút qua` : ''}`.trim()
+        : occupied === null ? `nhà không có cảm biến PIR, ${luxText}`
+          : `có người, ${dark ? 'trời tối' : dark === false ? 'trời sáng' : 'độ sáng vừa'} (${luxText})`;
     if (want === null) {
-      items.push({ key: 'light', text: l?.fresh || m?.fresh ? `Đèn: giữ nguyên (${why}, trong vùng trễ)` : 'Đèn: chưa có số liệu ánh sáng / PIR mới' });
+      items.push({ key: 'light', text: `Đèn: giữ nguyên (${why})` });
     } else if (isOn(light) === want) {
       items.push({ key: 'light', text: `Đèn: ${want ? 'BẬT' : 'TẮT'} đúng trạng thái (${why})` });
     } else {
