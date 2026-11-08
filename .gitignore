@@ -12,6 +12,10 @@ venv/
 __pycache__/
 *.pyc
 
+# Blockly hardware project export
+/Hardware/DADN.json
+/Hardware/README.md
+
 # IDE / hệ điều hành
 .idea/
 .vscode/

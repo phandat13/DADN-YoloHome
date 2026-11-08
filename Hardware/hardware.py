@@ -3,21 +3,17 @@ button_a.on_pressed = None
 button_b.on_pressed = None
 button_a.on_pressed_ab = button_b.on_pressed_ab = -1
 
-from mqtt import *
 from aiot_lcd1602 import LCD1602
 from event_manager import *
 from aiot_rgbled import RGBLed
 from aiot_dht20 import DHT20
+from machine import UART
 import time
 
 
-# Wi-Fi and Adafruit IO configuration.
-WIFI_SSID = 'YOUR_WIFI_SSID'
-WIFI_PASSWORD = 'YOUR_WIFI_PASSWORD'
-AIO_SERVER = 'io.adafruit.com'
-AIO_PORT = 1883
-AIO_USERNAME = 'phandat13'
-AIO_KEY = 'aio_REPLACE_WITH_YOUR_KEY'
+# Gateway Serial configuration.
+SERIAL_ID = 1
+SERIAL_BAUD = 115200
 
 # HOME:BIT wiring.
 RGB_PIN = pin0.pin
@@ -33,7 +29,6 @@ DOOR_CLOSED_ANGLE = 0
 SENSOR_INTERVAL_MS = 30000
 PIR_INTERVAL_MS = 100
 LOOP_INTERVAL_MS = 10
-RECONNECT_INTERVAL_MS = 5000
 DOOR_OPEN_TIME_MS = 2000
 TEMPERATURE_MIN = 18
 TEMPERATURE_MAX = 35
@@ -42,31 +37,22 @@ HUMIDITY_MAX = 80
 LIGHT_MIN = 0
 LIGHT_MAX = 100
 
-# Adafruit IO feed names.
-FEED_FAN = 'device-fan'
-FEED_LIGHT = 'device-light'
-FEED_DOOR_STATUS = 'door-status'
-FEED_ALERT = 'hardware-log'
-FEED_HUMIDITY = 'sensor-humidity'
-FEED_LIGHT_SENSOR = 'sensor-light'
-FEED_TEMPERATURE = 'sensor-temperature'
-FEED_DOOR = 'smart-door'
-
 aiot_lcd1602 = LCD1602()
 aiot_dht20 = DHT20()
 event_manager.reset()
 tiny_rgb = RGBLed(RGB_PIN, RGB_COUNT)
+serial = UART(0, baudrate=SERIAL_BAUD)
 
 temperature = 0.0
 humidity = 0.0
 light = 0
 motion = False
-ada_connected = False
+last_motion = False
 door_open = False
 door_close_deadline = 0
 last_alert = ''
-last_reconnect_attempt = 0
 last_sensor_publish = -SENSOR_INTERVAL_MS
+serial_buffer = ''
 
 
 def display_value(value, x, y):
@@ -93,6 +79,17 @@ def set_light(is_on):
     tiny_rgb.show(0, hex_to_rgb('#000000'))
 
 
+def set_light_color(value):
+  value = value.strip().upper()
+  if len(value) == 6:
+    value = '#' + value
+  if len(value) == 7 and value[0] == '#':
+    try:
+      tiny_rgb.show(0, hex_to_rgb(value))
+    except (ValueError, TypeError):
+      pass
+
+
 def set_fan_state(percent):
   if percent < 0:
     percent = 0
@@ -111,90 +108,76 @@ def set_door_state(state):
     door_open = False
 
 
+def send_frame(data_type, value):
+  try:
+    frame = '!' + str(SERIAL_ID) + ':' + data_type + ':' + str(value) + '#'
+    serial.write(frame.encode())
+    return True
+  except (OSError, ValueError, AttributeError):
+    return False
+
+
 def request_door_open():
   global door_close_deadline
   set_door_state('OPEN')
   door_close_deadline = time.ticks_add(time.ticks_ms(), DOOR_OPEN_TIME_MS)
-  publish_message(FEED_DOOR_STATUS, 'OPEN')
+  send_frame('DOOR', '1')
 
 
 def service_door():
   if door_open and time.ticks_diff(time.ticks_ms(), door_close_deadline) >= 0:
     set_door_state('CLOSED')
-    publish_message(FEED_DOOR_STATUS, 'CLOSED')
+    send_frame('DOOR', '0')
 
 
-def publish_message(feed, value):
-  global ada_connected
-  if not ada_connected:
-    return False
+def show_message(value):
+  aiot_lcd1602.clear()
+  aiot_lcd1602.putstr(value[:32])
+
+
+def handle_serial_frame(frame):
+  parts = frame.strip('!#').split(':', 1)
+  if len(parts) != 2:
+    return
+  command, value = parts[0].strip().upper(), parts[1].strip()
+  if command == 'LIGHT':
+    set_light(value.upper() in ('1', 'ON', 'TRUE'))
+  elif command == 'COLOR':
+    set_light_color(value)
+  elif command == 'FAN':
+    try:
+      set_fan_state(int(float(value)))
+    except ValueError:
+      pass
+  elif command == 'DOOR':
+    value = value.upper()
+    if value in ('1', 'OPEN', 'UNLOCK'):
+      request_door_open()
+    elif value in ('0', 'CLOSED', 'LOCK'):
+      set_door_state('CLOSED')
+      send_frame('DOOR', '0')
+  elif command == 'MSG':
+    show_message(value)
+
+
+def read_serial():
+  global serial_buffer
   try:
-    mqtt.publish(feed, value)
-    return True
-  except (OSError, ValueError):
-    ada_connected = False
-    return False
-
-
-def connect_wifi():
-  try:
-    if mqtt.wifi_connected():
-      return True
-  except (OSError, AttributeError):
-    pass
-  try:
-    mqtt.connect_wifi(WIFI_SSID, WIFI_PASSWORD)
-    return True
-  except (OSError, ValueError, Exception):
-    return False
-
-
-def connect_adafruit():
-  global ada_connected
-  try:
-    if not mqtt.wifi_connected():
-      ada_connected = False
-      return False
-    if ada_connected:
-      return True
-    mqtt.connect_broker(
-      server=AIO_SERVER,
-      port=AIO_PORT,
-      username=AIO_USERNAME,
-      password=AIO_KEY
-    )
-    mqtt.on_receive_message(FEED_FAN, on_fan_message)
-    mqtt.on_receive_message(FEED_LIGHT, on_light_message)
-    mqtt.on_receive_message(FEED_DOOR, on_door_message)
-    ada_connected = True
-    return True
-  except Exception:
-    ada_connected = False
-    return False
-
-
-def on_fan_message(message):
-  value = str(message).strip()
-  if value == '2':
-    set_fan_state(100)
-  elif value == '1':
-    set_fan_state(40)
-  else:
-    set_fan_state(0)
-
-
-def on_light_message(message):
-  value = str(message).strip().upper()
-  set_light(value == '1' or value == 'ON')
-
-
-def on_door_message(message):
-  value = str(message).strip().upper()
-  if value == '1' or value == 'OPEN' or value == 'UNLOCK':
-    request_door_open()
-  elif value == '0' or value == 'CLOSED' or value == 'LOCK':
-    set_door_state('CLOSED')
-    publish_message(FEED_DOOR_STATUS, 'CLOSED')
+    waiting = serial.any()
+    if waiting:
+      serial_buffer += serial.read(waiting).decode('utf-8', 'ignore')
+  except (OSError, ValueError, AttributeError):
+    return
+  while '!' in serial_buffer and '#' in serial_buffer:
+    start = serial_buffer.find('!')
+    end = serial_buffer.find('#', start)
+    if end == -1:
+      serial_buffer = serial_buffer[start:]
+      return
+    handle_serial_frame(serial_buffer[start:end + 1])
+    serial_buffer = serial_buffer[end + 1:]
+  if len(serial_buffer) > 256:
+    serial_buffer = serial_buffer[-64:]
 
 
 def publish_sensor_data():
@@ -202,11 +185,13 @@ def publish_sensor_data():
   now = time.ticks_ms()
   if time.ticks_diff(now, last_sensor_publish) < SENSOR_INTERVAL_MS:
     return True
-  if not publish_message(FEED_TEMPERATURE, temperature):
+  if not send_frame('TEMP', temperature):
     return False
-  if not publish_message(FEED_HUMIDITY, humidity):
+  if not send_frame('HUMI', humidity):
     return False
-  if not publish_message(FEED_LIGHT_SENSOR, light):
+  if not send_frame('LIGHT', light):
+    return False
+  if not send_frame('MOTION', 1 if motion else 0):
     return False
   last_sensor_publish = now
   return True
@@ -226,7 +211,7 @@ def publish_threshold_alert():
     last_alert = alert
     if alert:
       tiny_rgb.show(0, hex_to_rgb('#ff0000'))
-      publish_message(FEED_ALERT, 'ALERT|' + alert)
+      send_frame('LOG', 'ALERT|' + alert)
 
 
 def read_environment():
@@ -237,62 +222,50 @@ def read_environment():
   light = round(translate(LIGHT_PIN.read_analog(), 0, 4095, 0, 100))
   motion = PIR_PIN.read_digital() == 1
   display_environment()
-  if ada_connected:
-    publish_sensor_data()
-    publish_threshold_alert()
+  publish_sensor_data()
+  publish_threshold_alert()
   if motion:
     set_light(True)
 
 
 def update_motion():
-  global motion
+  global motion, last_motion
   motion = PIR_PIN.read_digital() == 1
+  if motion != last_motion:
+    send_frame('MOTION', 1 if motion else 0)
+    last_motion = motion
   if motion:
     set_light(True)
 
 
 def on_environment_timer():
   try:
-    if connect_adafruit():
-      read_environment()
+    read_environment()
   except (OSError, ValueError):
     aiot_lcd1602.clear()
     display_value('SENSOR ERROR', 0, 0)
-    if ada_connected:
-      publish_message(FEED_ALERT, 'SENSOR_ERROR')
+    send_frame('LOG', 'SENSOR_ERROR')
 
 
 event_manager.add_timer_event(SENSOR_INTERVAL_MS, on_environment_timer)
 event_manager.add_timer_event(PIR_INTERVAL_MS, update_motion)
 
 
-if True:
-  display.scroll('YoloHome')
-  aiot_lcd1602.clear()
-  aiot_lcd1602.backlight_on()
-  set_light(False)
-  set_fan_state(0)
-  set_door_state('CLOSED')
-  connect_wifi()
-  connect_adafruit()
-  on_environment_timer()
-  display.scroll('Welcome')
+display.scroll('YoloHome')
+aiot_lcd1602.clear()
+aiot_lcd1602.backlight_on()
+set_light(False)
+set_fan_state(0)
+set_door_state('CLOSED')
+on_environment_timer()
+display.scroll('Welcome')
 
 
 while True:
   try:
-    now = time.ticks_ms()
-    if not ada_connected and time.ticks_diff(now, last_reconnect_attempt) >= RECONNECT_INTERVAL_MS:
-      last_reconnect_attempt = now
-      if connect_wifi():
-        connect_adafruit()
-    if ada_connected:
-      try:
-        mqtt.check_message()
-      except (OSError, ValueError):
-        ada_connected = False
+    read_serial()
     service_door()
     event_manager.run()
   except (OSError, ValueError):
-    ada_connected = False
+    pass
   time.sleep_ms(LOOP_INTERVAL_MS)
